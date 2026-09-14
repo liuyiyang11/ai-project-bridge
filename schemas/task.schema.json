@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/ai-project-bridge/task.schema.json",
+  "title": "AI Project Bridge task",
+  "type": "object",
+  "required": ["version", "task_type", "project", "title"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"const": 1},
+    "task_type": {"enum": ["code", "presentation", "experiment-review"]},
+    "project": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "title": {"type": "string", "minLength": 1, "maxLength": 200},
+    "goal": {"type": "string"},
+    "instructions": {"type": "string"},
+    "acceptance": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "command_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+    "brief": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(^|[/\\])\.\.(?=$|[/\\])).+"},
+    "slides_spec": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(^|[/\\])\.\.(?=$|[/\\])).+"},
+    "assets_dir": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(^|[/\\])\.\.(?=$|[/\\])).+"},
+    "template": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(^|[/\\])\.\.(?=$|[/\\])).+"}
+  },
+  "allOf": [
+    {"if": {"properties": {"task_type": {"const": "experiment-review"}}}, "then": {"required": ["command_id"]}},
+    {"if": {"properties": {"task_type": {"const": "presentation"}}}, "then": {"anyOf": [{"required": ["brief"]}, {"required": ["slides_spec"]}, {"required": ["instructions"]}]}}
+  ]
+}
+
