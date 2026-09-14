@@ -64,12 +64,23 @@ class Dispatcher:
             project = self.config.project(task.project)
             if task.task_type not in project.capabilities:
                 raise ConfigError(f"project {task.project!r} does not support task type {task.task_type!r}")
-            if self.config.trusted_github_logins and not self.config.is_trusted_github_login(issue.author_login):
+            if not self.config.is_trusted_github_login(issue.author_login):
                 return None
         except Exception:
             raise
         if not self.store.exists(issue.number):
-            self.store.initialize(issue.number, issue.body, {"status": "ready", "project": task.project, "task_type": task.task_type, "title": task.title, "issue_url": issue.url})
+            self.store.initialize(
+                issue.number,
+                issue.body,
+                {
+                    "status": "ready",
+                    "project": task.project,
+                    "task_type": task.task_type,
+                    "title": task.title,
+                    "issue_url": issue.url,
+                    "author_login": issue.author_login,
+                },
+            )
         if not self.store.claim_new(issue.number):
             return None
         self.github.set_status(issue.number, "running")
@@ -81,6 +92,8 @@ class Dispatcher:
             return None
         state = self.store.load_state(issue.number)
         if state.get("status") != "review":
+            return None
+        if not self.config.is_trusted_github_login(issue.author_login or state.get("author_login")):
             return None
         full_issue = self.github.view_issue(issue.number)
         for comment in reversed(full_issue.comments):
@@ -136,8 +149,12 @@ class Dispatcher:
         message = f"{type(error).__name__}: {error}"
         if not self.store.exists(issue.number):
             self.store.initialize(issue.number, issue.body, {"status": "failed", "issue_url": issue.url})
-        self.store.update_state(issue.number, status="review" if preserve_review else "failed", finished_at=utc_now(), last_error=message)
-        self.store.write_result(issue.number, {"status": "review" if preserve_review else "failed", "error": message})
+        state = self.store.update_state(issue.number, status="review" if preserve_review else "failed", finished_at=utc_now(), last_error=message)
+        failure_result = {"status": "review" if preserve_review else "failed", "error": message}
+        if state.get("runs"):
+            failure_result["runs"] = state["runs"]
+            failure_result["run"] = state["runs"][-1]
+        self.store.write_result(issue.number, failure_result)
         try:
             self.github.set_status(issue.number, "review" if preserve_review else "failed")
             self.github.comment(issue.number, f"Bridge {'could not complete rework' if preserve_review else 'rejected or failed this task'}: {message[:700]}")
@@ -153,10 +170,12 @@ class Dispatcher:
             "issue_number": issue.number,
             "task_type": task.task_type,
             "project": task.project,
+            "source_issue": task.source_issue,
             "status": "review",
             "started_at": self.store.load_state(issue.number).get("started_at"),
             "finished_at": utc_now(),
             "codex_thread_id": result.get("thread_id"),
+            "runs": result.get("runs", self.store.load_state(issue.number).get("runs", [])),
             "changed_files": result.get("changed_files", []),
             "tests": result.get("tests", []),
             "artifact_list": result.get("artifact_list", []),

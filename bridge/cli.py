@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Optional, Union
+from urllib.parse import urlparse
 
 from .collectors.presentation_renderer import PresentationRenderer
 from .config import ConfigError, load_config
@@ -14,6 +16,7 @@ from .codex.runner import CodexRunner
 from .dispatcher import Dispatcher
 from .github import GhClient, GhError, find_executable
 from .task_store import TaskStore
+from .worktree import WorktreeError, WorktreeManager
 
 
 LABELS = [
@@ -97,10 +100,13 @@ def doctor(config_path: Union[str, Path]) -> int:
         if config.python_executable:
             checks.append(("Configured Python", config.python_executable.is_file(), str(config.python_executable)))
         for name, project in config.projects.items():
-            is_git = project.root.is_dir() and (subprocess_git_ok(project.root))
-            checks.append((f"Project {name}", is_git, f"{project.root} ({project.repo})" if is_git else f"not a Git repository: {project.root}"))
+            checks.extend(project_repository_checks(name, project))
     capabilities = PresentationRenderer().detect_capabilities()
-    checks.append(("Presentation renderer", True, capabilities.summary))
+    # These are optional presentation capabilities.  Report them explicitly
+    # without making ordinary code/experiment Bridge health depend on Office.
+    checks.append(("PowerPoint COM", True, "available" if capabilities.powerpoint_com else "unavailable"))
+    checks.append(("LibreOffice", True, "available" if capabilities.libreoffice else "unavailable"))
+    checks.append(("PDF-to-PNG renderer", True, "available" if capabilities.pdf_to_png else "unavailable"))
     for name, ok, detail in checks:
         print(f"[{ 'OK' if ok else 'FAIL' }] {name}: {detail}")
     return 0 if all(ok for _, ok, _ in checks) else 1
@@ -113,8 +119,95 @@ def subprocess_git_ok(root: Path) -> bool:
     return result.returncode == 0
 
 
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+        check=False,
+    )
+
+
+def normalize_remote_repo(url: str) -> Optional[str]:
+    """Normalize a GitHub remote URL to OWNER/REPOSITORY without reading credentials."""
+    value = url.strip()
+    if not value:
+        return None
+    if value.startswith("git@"):
+        host_and_path = value[4:].split(":", 1)
+        if len(host_and_path) != 2 or host_and_path[0].casefold() != "github.com":
+            return None
+        path = host_and_path[1]
+    else:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https", "ssh", "git"} or (parsed.hostname or "").casefold() != "github.com":
+            return None
+        path = parsed.path
+    path = path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = [part for part in path.split("/") if part]
+    if len(parts) != 2:
+        return None
+    return "/".join(parts)
+
+
+def project_repository_checks(name: str, project) -> list[tuple[str, bool, str]]:
+    checks: list[tuple[str, bool, str]] = []
+    root = Path(project.root)
+    is_git = root.is_dir() and subprocess_git_ok(root)
+    checks.append((f"Project {name} repository", is_git, str(root) if is_git else f"not a Git repository: {root}"))
+    if not is_git:
+        checks.extend(
+            [
+                (f"Project {name} remote {project.remote}", False, "repository check unavailable"),
+                (f"Project {name} base branch", False, "repository check unavailable"),
+            ]
+        )
+        return checks
+
+    manager = WorktreeManager(root, root / ".bridge-worktrees", project.remote, project.base_branch)
+    remote_url_result = _git(root, "remote", "get-url", project.remote)
+    remote_url = (remote_url_result.stdout or "").strip()
+    remote_ok = remote_url_result.returncode == 0 and bool(remote_url)
+    checks.append((f"Project {name} remote {project.remote}", remote_ok, remote_url or "remote does not exist"))
+    normalized = normalize_remote_repo(remote_url) if remote_ok else None
+    expected = project.repo.casefold()
+    checks.append(
+        (
+            f"Project {name} remote/repo",
+            normalized is not None and normalized.casefold() == expected,
+            f"configured {project.repo}; remote {normalized or remote_url or 'unavailable'}",
+        )
+    )
+    if not remote_ok or normalized is None or normalized.casefold() != expected:
+        checks.append((f"Project {name} base branch", False, "cannot validate until the configured remote matches project.repo"))
+        return checks
+    try:
+        base_branch = manager.default_branch()
+        base_ref = manager.base_ref(base_branch)
+        base_ok = not WorktreeManager._is_generated_issue_branch(base_branch)
+        detail = f"{base_branch} ({base_ref})" if base_ok else f"refusing generated issue branch: {base_branch}"
+    except WorktreeError as exc:
+        base_ok = False
+        detail = str(exc)
+    checks.append((f"Project {name} base branch", base_ok, detail))
+    return checks
+
+
+def validate_project_repositories(config) -> None:
+    failures = [f"{label}: {detail}" for name, project in config.projects.items() for label, ok, detail in project_repository_checks(name, project) if not ok]
+    if failures:
+        raise ConfigError("project repository checks failed; refusing to execute tasks: " + "; ".join(failures))
+
+
 def run_bridge(config, *, once: bool) -> int:
     try:
+        validate_project_repositories(config)
         github = make_github_client(config)
         runner = CodexRunner(config.codex_binary)
         dispatcher = Dispatcher(config, github, runner=runner)
@@ -130,7 +223,7 @@ def run_bridge(config, *, once: bool) -> int:
     except KeyboardInterrupt:
         print("Bridge stopped.")
         return 0
-    except (GhError, RuntimeError) as exc:
+    except (ConfigError, GhError, RuntimeError) as exc:
         print(f"Bridge error: {exc}", file=sys.stderr)
         return 1
 

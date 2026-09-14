@@ -14,6 +14,16 @@ class CodexUnavailableError(RuntimeError):
     """Raised when the configured Codex binary is unavailable."""
 
 
+class CodexResumeMismatchError(RuntimeError):
+    """Raised when a resumed Codex session returns a different thread."""
+
+    def __init__(self, requested_thread_id: str, returned_thread_id: Optional[str]):
+        self.requested_thread_id = requested_thread_id
+        self.returned_thread_id = returned_thread_id
+        returned = returned_thread_id or "<missing>"
+        super().__init__(f"Codex resume thread mismatch: requested {requested_thread_id!r}, returned {returned!r}")
+
+
 @dataclass(frozen=True)
 class CodexResult:
     task_id: str
@@ -23,6 +33,7 @@ class CodexResult:
     events_path: Path
     stdout: str = ""
     stderr: str = ""
+    requested_thread_id: Optional[str] = None
 
 
 class CodexRunner:
@@ -42,8 +53,7 @@ class CodexRunner:
             "--json",
             "--sandbox",
             "workspace-write",
-            "--ask-for-approval",
-            "never",
+            "--approve-for-me",
             "--cd",
             str(Path(cwd).resolve()),
             "-o",
@@ -56,16 +66,30 @@ class CodexRunner:
         command = [
             self.executable or self.binary,
             "exec",
+            "--json",
+            "--sandbox",
+            "workspace-write",
+            "--approve-for-me",
+            "--cd",
+            str(Path(cwd).resolve()),
             "resume",
             thread_id,
-            "--json",
             "-o",
             str(final_file or events_path.with_name("codex-final.txt")),
             "-",
         ]
-        return self._run(command, prompt, cwd, events_path, final_file)
+        return self._run(command, prompt, cwd, events_path, final_file, requested_thread_id=thread_id)
 
-    def _run(self, command: list[str], prompt: str, cwd: Path, events_path: Path, final_file: Optional[Path]) -> CodexResult:
+    def _run(
+        self,
+        command: list[str],
+        prompt: str,
+        cwd: Path,
+        events_path: Path,
+        final_file: Optional[Path],
+        *,
+        requested_thread_id: Optional[str] = None,
+    ) -> CodexResult:
         if not self._available:
             raise CodexUnavailableError("Codex CLI is not available; install it or update codex_binary")
         events_path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,11 +115,25 @@ class CodexRunner:
             stdout, stderr = process.communicate()
             exit_code = 124
 
-        events_path.write_text(stdout or "", encoding="utf-8")
+        # Each caller normally supplies a per-run path.  Append here as a second
+        # guard so a direct runner reuse can never erase an earlier event stream.
+        with events_path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(stdout or "")
         events = self._parse_events(stdout or "")
         thread_id = self._find_thread_id(events)
+        if requested_thread_id is not None and thread_id != requested_thread_id:
+            raise CodexResumeMismatchError(requested_thread_id, thread_id)
         final_message = final_path.read_text(encoding="utf-8") if final_path.is_file() else self._find_final_message(events)
-        return CodexResult(str(uuid.uuid4()), thread_id, exit_code, final_message.strip(), events_path, stdout or "", stderr or "")
+        return CodexResult(
+            str(uuid.uuid4()),
+            thread_id,
+            exit_code,
+            final_message.strip(),
+            events_path,
+            stdout or "",
+            stderr or "",
+            requested_thread_id,
+        )
 
     @staticmethod
     def _parse_events(stdout: str) -> list[dict[str, Any]]:
@@ -112,6 +150,9 @@ class CodexRunner:
     @classmethod
     def _find_thread_id(cls, events: list[dict[str, Any]]) -> Optional[str]:
         for event in events:
+            event_type = event.get("type") or event.get("event")
+            if event_type != "thread.started":
+                continue
             found = cls._find_value(event, {"thread_id", "threadId", "session_id", "sessionId"})
             if found:
                 return str(found)

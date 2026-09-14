@@ -38,6 +38,8 @@ def test_config_yaml_windows_double_quote_error_has_actionable_hint(tmp_path):
 
 def test_py39_can_start_bridge_cli():
     python = Path(r"E:\anaconda\envs\py39\python.exe")
+    if not python.is_file():
+        pytest.skip(f"configured Python is not installed: {python}")
     result = subprocess.run([str(python), "-m", "bridge", "--help"], capture_output=True, text=True, encoding="utf-8", errors="replace")
 
     assert result.returncode == 0, result.stderr

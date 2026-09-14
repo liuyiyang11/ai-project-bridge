@@ -20,6 +20,8 @@ Bridge 不执行远程 Issue 中的任意 shell、PowerShell、Python、绝对�
 ```powershell
 $Python = 'E:\anaconda\envs\py39\python.exe'
 & $Python -m pip install -e '.[test]'
+# Optional PPT rendering and PDF contact sheets:
+& $Python -m pip install -e '.[presentation]'
 Copy-Item config.local.yaml.example config.local.yaml
 ```
 
@@ -44,7 +46,7 @@ Bridge 不读取 token 文件、Codex auth 文件、SSH key、浏览器数据或
 ```yaml
 control_repo: "YOUR_NAME/ai-project-bridge"
 trusted_github_logins:
-  - "YOUR_NAME"
+  - "YOUR-NAME"
 poll_seconds: 30
 
 limits:
@@ -57,6 +59,8 @@ projects:
     capabilities: [code, experiment-review]
     root: "D:/Projects/UNetMamba"
     repo: "YOUR_NAME/UNetMamba"
+    remote: origin
+    base_branch: main
     allowed_commands:
       quick_test:
         argv: ["python", "-m", "pytest", "-q"]
@@ -114,7 +118,7 @@ $Python = 'E:\anaconda\envs\py39\python.exe'
 Bridge 会创建 `.bridge/worktrees/<project>-issue-<number>` 和 `ai/issue-<number>` branch，在 worktree 内调用当前 Codex CLI 的非交互形式：
 
 ```text
-codex exec --json --sandbox workspace-write --ask-for-approval never --cd <worktree> -
+codex exec --json --sandbox workspace-write --approve-for-me --cd <worktree> -
 ```
 
 随后执行本地 `quick_test`（如果已配置），收集 Git status/diff，commit，push issue branch，并创建 Draft PR。不会 push `main`/`master`，不会自动 merge。
@@ -123,7 +127,7 @@ codex exec --json --sandbox workspace-write --ask-for-approval never --cd <workt
 
 登记 `capabilities: [presentation]` 项目，在 Issue 中使用 `examples/presentation-task.md`。`brief`、`slides_spec`、`assets_dir`、`template` 都必须是项目 root 下的相对路径。
 
-Codex 在隔离 worktree 中生成/修改 PPTX。Bridge 会复制 `final.pptx` 到 review bundle，并在 Windows 上优先尝试 PowerPoint COM；不可用时尝试 LibreOffice。每次 doctor 会报告当前检测到的渲染能力。V0.1 不从网络下载未知二进制素材。
+Codex 在隔离 worktree 中生成/修改 PPTX。Bridge 会在提交前渲染 PPTX，并把有界的 `final.pdf`、`contact_sheet.png` 和 `slides_png/slide_*.png` 写入同一 `ai/issue-N` 分支的 `review_bundle/presentation/`，因此原 Draft PR 可直接在 ChatGPT Web 审查。Windows 上优先通过 PowerPoint COM 检测 Office，不要求 `POWERPNT.EXE` 在 PATH；不可用时尝试 LibreOffice。每次 doctor 会分别报告 PowerPoint COM、LibreOffice 和 PDF→PNG 能力。请用 `.[presentation]` 安装可选渲染依赖。
 
 ## 8. 创建 experiment-review task
 
@@ -133,7 +137,7 @@ Codex 在隔离 worktree 中生成/修改 PPTX。Bridge 会复制 `final.pptx` �
 - `task:experiment-review`
 - `status:ready`
 
-Issue 只能指定 config 中存在的 `command_id`，例如 `evaluate`。Bridge 不调用 Codex，而是在项目 root 使用已注册 argv，收集 `json/csv/txt/log/png/jpg/jpeg/webp`，限制单文件、总 bundle 和图片数量。`.pth`、`.pt`、`.ckpt`、dataset 和 checkpoint 路径默认拒绝。V0.1 已预留 `SampleSelector` 接口，但不做复杂的 worst/regression 算法。
+Issue 只能指定 config 中存在的 `command_id`，例如 `evaluate`。Bridge 不调用 Codex，而是在项目 root 使用已注册 argv，收集 `json/csv/txt/log/png/jpg/jpeg/webp`，限制单文件、总 bundle 和图片数量。experiment-review 可选 `source_issue: <positive integer>`，此时 Bridge 只接受本地同项目 code task 已登记且仍存在的候选 worktree，Issue 不能直接提供 cwd、branch 或路径。`.pth`、`.pt`、`.ckpt`、dataset 和 checkpoint 路径默认拒绝。V0.1 已预留 `SampleSelector` 接口，但不做复杂的 worst/regression 算法。
 
 ## 9. Web ChatGPT 审计与 review bundle
 
@@ -144,6 +148,9 @@ Issue 只能指定 config 中存在的 `command_id`，例如 `evaluate`。Bridge
   task.yaml
   state.json
   events.jsonl
+  runs/
+    001-initial.events.jsonl
+    002-rework.events.jsonl
   stdout.log
   stderr.log
   result.json
@@ -152,7 +159,7 @@ Issue 只能指定 config 中存在的 `command_id`，例如 `evaluate`。Bridge
     summary.md
 ```
 
-代码任务另外包含 `diff.patch` 和 `diff-stat.txt`；实验任务包含 bounded metrics/artifacts；PPT 任务包含 `presentation/final.pptx`，若渲染能力可用还会有 PDF/图片信息。
+代码任务另外包含 `diff.patch` 和 `diff-stat.txt`；每轮 Codex 的 JSONL 事件写入 `runs/` 且 state/result 保留 run 记录；实验任务包含 bounded metrics/artifacts；PPT 任务在项目分支的 `review_bundle/presentation/` 包含 `final.pptx` 及可用的 PDF/PNG 审查文件。
 
 ChatGPT Web 可以审计 Draft PR 的 diff、测试结果和 Issue 评论中的 review bundle 摘要。不要把大数据、checkpoint 或 secrets 上传到 GitHub；超限文件只在 Issue 中报告未上传原因和本地路径。
 
@@ -169,7 +176,7 @@ instruction: |
 ```
 ```
 
-Bridge 只接受 `trusted_github_logins` 中 GitHub 用户提交的 rework comment；未受信任的 comment 会被忽略，不调用 Codex，也不会把任务标为失败。对带有 author 信息的任务 Issue，配置了 trusted list 时也会进行同样的校验。可信 rework 会使用 `state.json` 中保存的 Codex thread/session id 调用 `codex exec resume <SESSION_ID> - --json`，复用同一个 worktree 和 branch，重新测试并更新原 Draft PR。comment id 会持久化，重复扫描不会重复返工。
+Bridge 只接受 `trusted_github_logins` 中 GitHub 用户提交的任务 Issue 和 rework comment；`trusted_github_logins` 为空时配置校验失败。未受信任的 comment 会被忽略，不调用 Codex，也不会把任务标为失败。可信 rework 会使用 `state.json` 中保存的 Codex thread/session id，并显式复用 workspace-write、非交互审批策略、当前 worktree cwd；返回 thread id 不一致时以 `CodexResumeMismatchError` 失败，不覆盖原 thread。
 
 ## 11. 出错恢复
 

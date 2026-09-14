@@ -1,6 +1,6 @@
 control_repo: "OWNER/ai-project-bridge"
 trusted_github_logins:
-  - "YOUR_GITHUB_LOGIN"
+  - "YOUR-GITHUB-LOGIN"
 poll_seconds: 30
 
 limits:
@@ -13,6 +13,8 @@ projects:
     capabilities: [code, experiment-review]
     root: "D:/Projects/code-project"
     repo: "OWNER/code-project"
+    remote: origin
+    base_branch: main
     allowed_commands:
       quick_test:
         argv: ["python", "-m", "pytest", "-q"]
@@ -24,6 +26,8 @@ projects:
     capabilities: [presentation]
     root: "D:/Presentations/ThesisDefense"
     repo: "OWNER/ThesisDefense"
+    remote: origin
+    base_branch: main
     allowed_commands: {}
     artifact_dirs: []
 
@@ -31,6 +35,8 @@ projects:
     capabilities: [experiment-review]
     root: "D:/Projects/experiment-project"
     repo: "OWNER/experiment-project"
+    remote: origin
+    base_branch: main
     allowed_commands:
       evaluate:
         argv: ["python", "tools/evaluate.py"]

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 def utc_now() -> str:
@@ -30,6 +31,17 @@ class TaskStore:
             raise ValueError(f"unsupported task file: {name}")
         return self.task_dir(issue_number) / name
 
+    def run_events_path(self, issue_number: int, run_number: int, run_kind: str) -> Path:
+        """Return the append-only JSONL path for one Codex run."""
+        if int(run_number) <= 0:
+            raise ValueError("run number must be positive")
+        if not re.fullmatch(r"[a-z][a-z0-9-]*", run_kind):
+            raise ValueError("run kind must be a safe identifier")
+        path = self.task_dir(issue_number) / "runs" / f"{int(run_number):03d}-{run_kind}.events.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
+        return path
+
     def initialize(self, issue_number: int, task_yaml: str, state: dict[str, Any]) -> None:
         directory = self.task_dir(issue_number)
         directory.mkdir(parents=True, exist_ok=True)
@@ -38,6 +50,7 @@ class TaskStore:
             "issue_number": int(issue_number),
             "created_at": utc_now(),
             "processed_rework_comment_ids": [],
+            "runs": [],
             **state,
         }
         self._write_json(self.task_path(issue_number, "state.json"), initial)
@@ -58,6 +71,38 @@ class TaskStore:
         state["updated_at"] = utc_now()
         self._write_json(self.task_path(issue_number, "state.json"), state)
         return state
+
+    def begin_run(self, issue_number: int, run_kind: str, *, requested_thread_id: Optional[str] = None) -> dict[str, Any]:
+        state = self.load_state(issue_number)
+        runs = list(state.get("runs", []))
+        run_number = max((int(item.get("number", 0)) for item in runs if isinstance(item, dict)), default=0) + 1
+        events_path = self.run_events_path(issue_number, run_number, run_kind)
+        record: dict[str, Any] = {
+            "number": run_number,
+            "kind": run_kind,
+            "events_path": events_path.relative_to(self.task_dir(issue_number)).as_posix(),
+            "requested_thread_id": requested_thread_id,
+            "status": "running",
+            "started_at": utc_now(),
+        }
+        runs.append(record)
+        state.update({"runs": runs, "current_run": run_number, "updated_at": utc_now()})
+        self._write_json(self.task_path(issue_number, "state.json"), state)
+        return record
+
+    def finish_run(self, issue_number: int, run_number: int, **updates: Any) -> dict[str, Any]:
+        state = self.load_state(issue_number)
+        runs = list(state.get("runs", []))
+        for record in runs:
+            if isinstance(record, dict) and int(record.get("number", 0)) == int(run_number):
+                record.update(updates)
+                record["finished_at"] = utc_now()
+                break
+        else:
+            raise ValueError(f"run does not exist: {run_number}")
+        state.update({"runs": runs, "updated_at": utc_now()})
+        self._write_json(self.task_path(issue_number, "state.json"), state)
+        return next(record for record in runs if int(record.get("number", 0)) == int(run_number))
 
     def write_result(self, issue_number: int, result: dict[str, Any]) -> None:
         self._write_json(self.task_path(issue_number, "result.json"), result)

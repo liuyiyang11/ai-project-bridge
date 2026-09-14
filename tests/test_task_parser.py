@@ -106,3 +106,33 @@ instruction: |
 def test_rework_comment_without_marker_is_rejected():
     with pytest.raises(TaskParseError, match="REWORK"):
         parse_rework_comment("please fix it")
+
+
+def test_experiment_review_source_issue_must_be_positive_integer():
+    task = parse_task_body(
+        """<!-- AI_BRIDGE_TASK -->
+```yaml
+version: 1
+task_type: experiment-review
+project: demo
+title: Review candidate
+command_id: evaluate
+source_issue: 20
+```
+"""
+    )
+    assert task.source_issue == 20
+
+    with pytest.raises(TaskParseError, match="greater than 0|positive"):
+        parse_task_body(
+            """<!-- AI_BRIDGE_TASK -->
+```yaml
+version: 1
+task_type: experiment-review
+project: demo
+title: Review candidate
+command_id: evaluate
+source_issue: 0
+```
+"""
+        )

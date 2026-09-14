@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from bridge.codex.runner import CodexRunner, CodexUnavailableError
+from bridge.codex.runner import CodexResumeMismatchError, CodexRunner, CodexUnavailableError
 
 
 class FakeProcess:
@@ -54,9 +54,54 @@ def test_codex_runner_resume_uses_saved_thread_id(tmp_path):
     runner = CodexRunner("codex", popen=fake_popen, available=True)
     runner.resume_task("thread-123", "rework", tmp_path, tmp_path / "events.jsonl")
 
-    assert calls[0][:4] == [runner.executable, "exec", "resume", "thread-123"]
+    assert calls[0][:2] == [runner.executable, "exec"]
+    assert calls[0][calls[0].index("resume") : calls[0].index("resume") + 2] == ["resume", "thread-123"]
     assert "--json" in calls[0]
+    assert "--sandbox" in calls[0] and calls[0][calls[0].index("--sandbox") + 1] == "workspace-write"
+    assert "--approve-for-me" in calls[0]
+    assert calls[0][calls[0].index("--cd") + 1] == str(tmp_path.resolve())
     assert "--dangerously-bypass-approvals-and-sandbox" not in calls[0]
+
+
+def test_codex_runner_resume_rejects_thread_continuity_mismatch(tmp_path):
+    class MismatchProcess(FakeProcess):
+        def communicate(self, input=None, timeout=None):
+            return '{"type":"thread.started","thread_id":"new-thread"}\n', ""
+
+    def fake_popen(argv, **kwargs):
+        return MismatchProcess(argv, **kwargs)
+
+    events = tmp_path / "runs" / "002-rework.events.jsonl"
+    runner = CodexRunner("codex", popen=fake_popen, available=True)
+    with pytest.raises(CodexResumeMismatchError, match="thread mismatch") as error:
+        runner.resume_task("saved-thread", "rework", tmp_path, events)
+
+    assert error.value.requested_thread_id == "saved-thread"
+    assert error.value.returned_thread_id == "new-thread"
+    assert "new-thread" in events.read_text(encoding="utf-8")
+
+
+def test_codex_runner_appends_events_when_a_path_is_reused(tmp_path):
+    outputs = iter(
+        [
+            '{"type":"thread.started","thread_id":"saved-thread"}\n',
+            '{"type":"thread.started","thread_id":"saved-thread"}\n',
+        ]
+    )
+
+    class SequentialProcess(FakeProcess):
+        def communicate(self, input=None, timeout=None):
+            return next(outputs), ""
+
+    def fake_popen(argv, **kwargs):
+        return SequentialProcess(argv, **kwargs)
+
+    events = tmp_path / "events.jsonl"
+    runner = CodexRunner("codex", popen=fake_popen, available=True)
+    runner.start_task("initial", tmp_path, events)
+    runner.resume_task("saved-thread", "rework", tmp_path, events)
+
+    assert events.read_text(encoding="utf-8").count("thread.started") == 2
 
 
 def test_missing_codex_is_clear(tmp_path):

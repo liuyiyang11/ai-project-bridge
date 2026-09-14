@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ..codex.runner import CodexResumeMismatchError
 from ..collectors.git_collector import collect_git_state
 from ..commands import run_registered_command
 from ..config import ProjectConfig
@@ -43,24 +44,53 @@ class CodeExecutor:
     def _manager(self, context: ExecutionContext) -> WorktreeManager:
         if self.manager_factory:
             return self.manager_factory(context.project, context.config.state_root / "worktrees")
-        return WorktreeManager(context.project.root, context.config.state_root / "worktrees")
+        return WorktreeManager(
+            context.project.root,
+            context.config.state_root / "worktrees",
+            context.project.remote,
+            context.project.base_branch,
+        )
+
+    def _prepare_review_artifacts(self, context: ExecutionContext, worktree: Path, bundle_dir: Path, codex_result: Any) -> dict:
+        """Hook for task types that must prepare files before the branch is committed."""
+        return {}
 
     def _execute_codex(self, context: ExecutionContext, prompt: str, rework_instruction: Optional[str]) -> dict:
         manager = self._manager(context)
         info = manager.prepare(context.task.project, context.issue.number)
         context.store.update_state(context.issue.number, worktree_path=str(info.path), branch=info.branch, base_branch=info.base_branch, base_head=info.base_head)
-        events_path = context.store.task_path(context.issue.number, "events.jsonl")
         runner = self.runner or context.runner
-        if rework_instruction and context.store.load_state(context.issue.number).get("thread_id"):
-            result = runner.resume_task(context.store.load_state(context.issue.number)["thread_id"], prompt, info.path, events_path)
-        else:
-            result = runner.start_task(prompt, info.path, events_path)
+        state = context.store.load_state(context.issue.number)
+        requested_thread_id = state.get("thread_id") if rework_instruction and state.get("thread_id") else None
+        run_kind = "rework" if requested_thread_id else "initial"
+        run_record = context.store.begin_run(context.issue.number, run_kind, requested_thread_id=requested_thread_id)
+        events_path = context.store.task_dir(context.issue.number) / run_record["events_path"]
+        try:
+            if requested_thread_id:
+                result = runner.resume_task(requested_thread_id, prompt, info.path, events_path)
+            else:
+                result = runner.start_task(prompt, info.path, events_path)
+        except Exception as exc:
+            context.store.finish_run(context.issue.number, run_record["number"], status="failed", error=f"{type(exc).__name__}: {exc}")
+            raise
         context.store.append_stdout(context.issue.number, _value(result, "stdout", ""))
         context.store.append_stderr(context.issue.number, _value(result, "stderr", ""))
         thread_id = _value(result, "thread_id")
+        if requested_thread_id is not None and thread_id != requested_thread_id:
+            mismatch = CodexResumeMismatchError(requested_thread_id, thread_id)
+            context.store.finish_run(context.issue.number, run_record["number"], status="failed", returned_thread_id=thread_id, error=str(mismatch))
+            raise mismatch
         if thread_id:
             context.store.update_state(context.issue.number, thread_id=thread_id)
-        if int(_value(result, "exit_code", 1)) != 0:
+        exit_code = int(_value(result, "exit_code", 1))
+        completed_run = context.store.finish_run(
+            context.issue.number,
+            run_record["number"],
+            status="completed" if exit_code == 0 else "failed",
+            returned_thread_id=thread_id,
+            exit_code=exit_code,
+        )
+        if exit_code != 0:
             raise RuntimeError(f"Codex exited with code {_value(result, 'exit_code')}: {_value(result, 'final_message', '')}")
 
         tests: list[dict] = []
@@ -74,6 +104,7 @@ class CodeExecutor:
                 raise RuntimeError(f"configured quick_test failed with code {command_result.returncode}")
 
         bundle_dir = context.task_dir / "review_bundle"
+        prepared = self._prepare_review_artifacts(context, info.path, bundle_dir, result)
         git_state = collect_git_state(info.path, bundle_dir)
         if not git_state["changed_files"]:
             raise RuntimeError("Codex completed without any changed files")
@@ -84,15 +115,19 @@ class CodeExecutor:
             if not pr_url:
                 body = self._pr_body(context, result, git_state["changed_files"], tests)
                 pr_url = context.project_github.create_draft_pr(info.branch, info.base_branch, context.task.title, body)
+        current_state = context.store.load_state(context.issue.number)
         return {
             "thread_id": thread_id,
             "final_message": _value(result, "final_message", ""),
             "changed_files": git_state["changed_files"],
             "tests": tests,
-            "artifact_list": [],
+            "artifact_list": prepared.get("artifact_list", []),
             "bundle_dir": str(bundle_dir),
             "pr_url": pr_url,
             "commit": commit,
+            "run": completed_run,
+            "runs": current_state.get("runs", []),
+            **{key: value for key, value in prepared.items() if key != "artifact_list"},
             "known_limitations": "Diff is captured from the task worktree; binary artifacts are not embedded unless explicitly collected.",
         }
 

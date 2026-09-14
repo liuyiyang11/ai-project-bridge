@@ -8,6 +8,7 @@ from bridge.config import ConfigError, load_config
 def write_config(path: Path, root: Path) -> None:
     path.write_text(
         f"""control_repo: owner/bridge
+trusted_github_logins: [trusted-user]
 poll_seconds: 5
 projects:
   demo:
@@ -82,5 +83,13 @@ shell: powershell
     )
 
     with pytest.raises(ConfigError, match="config"):
+        load_config(config_path)
+
+
+def test_config_rejects_empty_trusted_github_logins(tmp_path):
+    config_path = tmp_path / "config.local.yaml"
+    config_path.write_text("control_repo: owner/bridge\ntrusted_github_logins: []\nprojects: {}\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="trusted_github_logins"):
         load_config(config_path)
 

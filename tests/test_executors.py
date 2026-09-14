@@ -1,5 +1,9 @@
 from types import SimpleNamespace
+from pathlib import Path
 
+import pytest
+
+from bridge.codex.runner import CodexResumeMismatchError
 from bridge.config import load_config
 from bridge.executors import ExecutionContext
 from bridge.executors.code import CodeExecutor
@@ -53,6 +57,24 @@ class FakeRenderer:
         return {"final_pptx": "final.pptx", "final_pdf": None, "slides_png": [], "contact_sheet": None, "capabilities": "fake", "errors": []}
 
 
+class FullFakeRenderer:
+    def render(self, pptx_path, output_dir):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "final.pptx").write_bytes(pptx_path.read_bytes())
+        (output_dir / "final.pdf").write_bytes(b"pdf")
+        (output_dir / "slides_png").mkdir()
+        (output_dir / "slides_png" / "slide_001.png").write_bytes(b"slide")
+        (output_dir / "contact_sheet.png").write_bytes(b"contact")
+        return {
+            "final_pptx": "final.pptx",
+            "final_pdf": "final.pdf",
+            "slides_png": ["slides_png/slide_001.png"],
+            "contact_sheet": "contact_sheet.png",
+            "capabilities": "fake",
+            "errors": [],
+        }
+
+
 def make_repo(tmp_path):
     import subprocess
 
@@ -71,6 +93,7 @@ def make_config(tmp_path, repo, kind="code", command="quick_test", project_repo=
     config_path = tmp_path / "config.local.yaml"
     config_path.write_text(
         f"""control_repo: owner/bridge
+trusted_github_logins: [trusted-user]
 projects:
   demo:
     kind: {kind}
@@ -262,3 +285,210 @@ command_id: evaluate
     assert "owner/project-repo" in calls[0][0]
     assert "Control task: owner/bridge#15" in calls[0][1]["input"]
     assert "Closes #15" not in calls[0][1]["input"]
+
+
+def test_experiment_review_uses_candidate_worktree_from_source_code_task(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "outputs").mkdir()
+    (repo / "outputs" / "root-only.json").write_text("old", encoding="utf-8")
+    config_path = tmp_path / "config.local.yaml"
+    config_path.write_text(
+        f"""control_repo: owner/bridge
+trusted_github_logins: [trusted-user]
+projects:
+  demo:
+    capabilities: [code, experiment-review]
+    root: {repo.as_posix()}
+    repo: owner/demo
+    allowed_commands:
+      evaluate:
+        argv: [python, -c, 'print(\"candidate\")']
+    artifact_dirs: [outputs]
+""",
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    store = TaskStore(config.state_root)
+    source_body = """<!-- AI_BRIDGE_TASK -->
+```yaml
+version: 1
+task_type: code
+project: demo
+title: Candidate code
+```
+"""
+    source = WorktreeManager(repo, config.state_root / "worktrees").prepare("demo", 20)
+    (source.path / "outputs").mkdir()
+    (source.path / "outputs" / "candidate-only.json").write_text("candidate", encoding="utf-8")
+    store.initialize(
+        20,
+        source_body,
+        {
+            "status": "review",
+            "project": "demo",
+            "task_type": "code",
+            "worktree_path": str(source.path),
+            "branch": source.branch,
+        },
+    )
+    review_task = parse_task_body(
+        """<!-- AI_BRIDGE_TASK -->
+```yaml
+version: 1
+task_type: experiment-review
+project: demo
+title: Review candidate
+command_id: evaluate
+source_issue: 20
+```
+"""
+    )
+    store.initialize(21, "task", {"status": "running", "project": "demo", "task_type": "experiment-review"})
+    context = ExecutionContext(config, Issue(21, "Review", "", "https://github/issues/21", set()), review_task, config.project("demo"), store, store.task_dir(21), FakeGitHub(), FakeGitHub(), None)
+
+    result = ExperimentReviewExecutor(publish=False).execute(context)
+
+    assert any(item["source"] == "outputs/candidate-only.json" for item in result["artifact_list"])
+    assert not (repo / "outputs" / "candidate-only.json").exists()
+
+
+def test_experiment_review_rejects_source_issue_from_another_project(tmp_path):
+    repo = make_repo(tmp_path)
+    config = make_config(tmp_path, repo, kind="experiment-review", command="evaluate")
+    store = TaskStore(config.state_root)
+    source_body = """<!-- AI_BRIDGE_TASK -->
+```yaml
+version: 1
+task_type: code
+project: other
+title: Other code
+```
+"""
+    store.initialize(20, source_body, {"status": "review", "project": "other", "task_type": "code", "worktree_path": str(tmp_path / "candidate"), "branch": "ai/issue-20"})
+    review_task = parse_task_body(
+        """<!-- AI_BRIDGE_TASK -->
+```yaml
+version: 1
+task_type: experiment-review
+project: demo
+title: Review candidate
+command_id: evaluate
+source_issue: 20
+```
+"""
+    )
+    store.initialize(21, "task", {"status": "running", "project": "demo", "task_type": "experiment-review"})
+    context = ExecutionContext(config, Issue(21, "Review", "", "https://github/issues/21", set()), review_task, config.project("demo"), store, store.task_dir(21), FakeGitHub(), FakeGitHub(), None)
+
+    with pytest.raises(RuntimeError, match="different project"):
+        ExperimentReviewExecutor(publish=False).execute(context)
+
+
+def test_presentation_review_artifacts_are_committed_to_the_same_issue_branch(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "brief.md").write_text("brief", encoding="utf-8")
+    config = make_config(tmp_path, repo, kind="presentation")
+    store = TaskStore(config.state_root)
+    issue = Issue(22, "Slides", "", "https://github/issues/22", {"ai-task", "task:presentation", "status:running"})
+    task = parse_task_body(
+        """<!-- AI_BRIDGE_TASK -->
+```yaml
+version: 1
+task_type: presentation
+project: demo
+title: Slides
+brief: brief.md
+```
+"""
+    )
+    store.initialize(22, "task", {"status": "running", "project": "demo", "task_type": "presentation"})
+    runner = FakeRunner("deck.pptx")
+    executor = PresentationExecutor(
+        runner=runner,
+        manager_factory=lambda project, root: NoPushManager(project.root, root),
+        renderer=FullFakeRenderer(),
+    )
+    context = ExecutionContext(config, issue, task, config.project("demo"), store, store.task_dir(22), FakeGitHub(), FakeGitHub(), runner)
+
+    result = executor.execute(context)
+
+    branch_worktree = Path(store.load_state(22)["worktree_path"])
+    for path in ("final.pptx", "final.pdf", "contact_sheet.png", "slides_png/slide_001.png"):
+        assert (branch_worktree / "review_bundle" / "presentation" / path).is_file()
+    assert {item["path"] for item in result["artifact_list"]} >= {
+        "presentation/final.pptx",
+        "presentation/final.pdf",
+        "presentation/contact_sheet.png",
+        "presentation/slides_png/slide_001.png",
+    }
+
+
+def test_code_rework_keeps_append_only_run_event_files_and_state_records(tmp_path):
+    repo = make_repo(tmp_path)
+    config = make_config(tmp_path, repo)
+    store = TaskStore(config.state_root)
+    issue = Issue(23, "Code", "", "https://github/issues/23", {"ai-task", "task:code", "status:running"})
+    task = parse_task_body(
+        """<!-- AI_BRIDGE_TASK -->
+```yaml
+version: 1
+task_type: code
+project: demo
+title: Change demo
+```
+"""
+    )
+    store.initialize(23, "task", {"status": "running", "project": "demo", "task_type": "code"})
+    runner = FakeRunner()
+    executor = CodeExecutor(runner=runner, manager_factory=lambda project, root: NoPushManager(project.root, root), publish=False)
+    context = ExecutionContext(config, issue, task, config.project("demo"), store, store.task_dir(23), FakeGitHub(), FakeGitHub(), runner)
+
+    executor.execute(context)
+    executor.execute(context, rework_instruction="Fix the change.")
+
+    state = store.load_state(23)
+    assert [run["kind"] for run in state["runs"]] == ["initial", "rework"]
+    assert (store.task_dir(23) / "runs" / "001-initial.events.jsonl").is_file()
+    assert (store.task_dir(23) / "runs" / "002-rework.events.jsonl").is_file()
+    assert state["runs"][1]["requested_thread_id"] == "fake-thread"
+
+
+def test_code_resume_mismatch_keeps_original_thread_in_state(tmp_path):
+    repo = make_repo(tmp_path)
+    config = make_config(tmp_path, repo)
+    store = TaskStore(config.state_root)
+    issue = Issue(24, "Code", "", "https://github/issues/24", {"ai-task", "task:code", "status:review"})
+    task = parse_task_body(
+        """<!-- AI_BRIDGE_TASK -->
+```yaml
+version: 1
+task_type: code
+project: demo
+title: Change demo
+```
+"""
+    )
+    store.initialize(
+        24,
+        "task",
+        {"status": "review", "project": "demo", "task_type": "code", "thread_id": "saved-thread"},
+    )
+
+    class MismatchRunner:
+        def resume_task(self, thread_id, prompt, cwd, events_path):
+            raise CodexResumeMismatchError(thread_id, "new-thread")
+
+    executor = CodeExecutor(
+        runner=MismatchRunner(),
+        manager_factory=lambda project, root: NoPushManager(project.root, root),
+        publish=False,
+    )
+    context = ExecutionContext(config, issue, task, config.project("demo"), store, store.task_dir(24), FakeGitHub(), FakeGitHub(), None)
+
+    with pytest.raises(CodexResumeMismatchError):
+        executor.execute(context, rework_instruction="Fix it.")
+
+    state = store.load_state(24)
+    assert state["thread_id"] == "saved-thread"
+    assert state["runs"][0]["requested_thread_id"] == "saved-thread"
+    assert state["runs"][0]["status"] == "failed"

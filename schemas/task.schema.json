@@ -14,14 +14,16 @@
     "instructions": {"type": "string"},
     "acceptance": {"type": "array", "items": {"type": "string", "minLength": 1}},
     "command_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
-    "brief": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(^|[/\\])\.\.(?=$|[/\\])).+"},
-    "slides_spec": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(^|[/\\])\.\.(?=$|[/\\])).+"},
-    "assets_dir": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(^|[/\\])\.\.(?=$|[/\\])).+"},
-    "template": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(^|[/\\])\.\.(?=$|[/\\])).+"}
+    "brief": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(^|[/\\\\])\\.\\.(?=$|[/\\\\])).+"},
+    "slides_spec": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(^|[/\\\\])\\.\\.(?=$|[/\\\\])).+"},
+    "assets_dir": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(^|[/\\\\])\\.\\.(?=$|[/\\\\])).+"},
+    "template": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(^|[/\\\\])\\.\\.(?=$|[/\\\\])).+"},
+    "source_issue": {"type": "integer", "minimum": 1}
   },
   "allOf": [
     {"if": {"properties": {"task_type": {"const": "experiment-review"}}}, "then": {"required": ["command_id"]}},
-    {"if": {"properties": {"task_type": {"const": "presentation"}}}, "then": {"anyOf": [{"required": ["brief"]}, {"required": ["slides_spec"]}, {"required": ["instructions"]}]}}
+    {"if": {"properties": {"task_type": {"const": "presentation"}}}, "then": {"anyOf": [{"required": ["brief"]}, {"required": ["slides_spec"]}, {"required": ["instructions"]}]}},
+    {"if": {"properties": {"task_type": {"enum": ["code", "presentation"]}}, "required": ["task_type"]}, "then": {"not": {"required": ["source_issue"]}}}
   ]
 }
 

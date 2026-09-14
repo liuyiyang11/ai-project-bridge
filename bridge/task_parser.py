@@ -4,13 +4,16 @@ import re
 from typing import Literal, Optional
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, root_validator, validator
+from pydantic import BaseModel, Field, ValidationError, conint, root_validator, validator
 
 from .security import SecurityError, ensure_safe_project_name, ensure_safe_relative_path
 
 
 class TaskParseError(ValueError):
     """Raised when an Issue body is not a valid Bridge task."""
+
+
+StrictPositiveInt = conint(strict=True, gt=0)
 
 
 class BridgeTask(BaseModel):
@@ -30,6 +33,7 @@ class BridgeTask(BaseModel):
     slides_spec: Optional[str] = None
     assets_dir: Optional[str] = None
     template: Optional[str] = None
+    source_issue: Optional[StrictPositiveInt] = None
 
     @validator("project")
     def validate_project(cls, value: str) -> str:
@@ -67,6 +71,8 @@ class BridgeTask(BaseModel):
                     raise ValueError(f"{name} must be a project-relative path: {exc}") from exc
         if task_type == "experiment-review" and not values.get("command_id"):
             raise ValueError("experiment-review task requires command_id")
+        if values.get("source_issue") is not None and task_type != "experiment-review":
+            raise ValueError("source_issue is only valid for experiment-review tasks")
         if task_type == "presentation" and not any((values.get("brief"), values.get("slides_spec"), values.get("instructions"))):
             raise ValueError("presentation task requires brief, slides_spec, or instructions")
         return values

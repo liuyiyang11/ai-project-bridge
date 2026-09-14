@@ -40,6 +40,8 @@ class ProjectConfig(BaseModel):
     capabilities: Optional[list[ProjectCapability]] = None
     root: Path
     repo: str
+    remote: str = "origin"
+    base_branch: Optional[str] = None
     allowed_commands: dict[str, AllowedCommand] = Field(default_factory=dict)
     artifact_dirs: list[str] = Field(default_factory=list)
 
@@ -47,6 +49,27 @@ class ProjectConfig(BaseModel):
     def validate_repo(cls, value: str) -> str:
         if "/" not in value or value.startswith("/") or " " in value:
             raise ValueError("repo must be in OWNER/REPOSITORY form")
+        return value
+
+    @validator("remote")
+    def validate_remote(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+            raise ValueError("remote must be a safe Git remote name")
+        return value
+
+    @validator("base_branch")
+    def validate_base_branch(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        if (
+            not value
+            or value.startswith(("/", "-"))
+            or value.endswith(("/", "."))
+            or ".." in value
+            or "@{" in value
+            or not re.fullmatch(r"[A-Za-z0-9._/-]+", value)
+        ):
+            raise ValueError("base_branch must be a safe Git branch name")
         return value
 
     @validator("artifact_dirs")
@@ -107,13 +130,15 @@ class BridgeConfig(BaseModel):
             raise ValueError("control_repo must be in OWNER/REPOSITORY form")
         return value
 
-    @validator("trusted_github_logins")
+    @validator("trusted_github_logins", always=True)
     def validate_trusted_github_logins(cls, value: set[str]) -> set[str]:
         normalized: set[str] = set()
         for login in value:
             if not isinstance(login, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,39}", login):
                 raise ValueError("trusted_github_logins entries must be GitHub login names")
             normalized.add(login.casefold())
+        if not normalized:
+            raise ValueError("trusted_github_logins must contain at least one GitHub login")
         return normalized
 
     @validator("state_dir")
