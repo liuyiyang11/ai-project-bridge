@@ -1,0 +1,36 @@
+control_repo: "OWNER/ai-project-bridge"
+poll_seconds: 30
+
+limits:
+  max_artifact_file_mb: 25
+  max_bundle_mb: 100
+  max_images: 20
+
+projects:
+  code-project:
+    kind: code
+    root: "D:/Projects/code-project"
+    repo: "OWNER/code-project"
+    allowed_commands:
+      quick_test:
+        argv: ["python", "-m", "pytest", "-q"]
+      evaluate:
+        argv: ["python", "tools/evaluate.py"]
+    artifact_dirs: ["outputs", "results", "runs"]
+
+  thesis-ppt:
+    kind: presentation
+    root: "D:/Presentations/ThesisDefense"
+    repo: "OWNER/ThesisDefense"
+    allowed_commands: {}
+    artifact_dirs: []
+
+  experiment-project:
+    kind: experiment-review
+    root: "D:/Projects/experiment-project"
+    repo: "OWNER/experiment-project"
+    allowed_commands:
+      evaluate:
+        argv: ["python", "tools/evaluate.py"]
+    artifact_dirs: ["outputs", "results", "runs"]
+

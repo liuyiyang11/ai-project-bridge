@@ -1,0 +1,28 @@
+# Copy this file to config.local.yaml. Keep the copy private and ignored.
+control_repo: "YOUR_GITHUB_NAME/ai-project-bridge"
+poll_seconds: 30
+
+limits:
+  max_artifact_file_mb: 25
+  max_bundle_mb: 100
+  max_images: 20
+
+projects:
+  unetmamba:
+    kind: code
+    root: "D:/Projects/UNetMamba"
+    repo: "YOUR_GITHUB_NAME/UNetMamba"
+    allowed_commands:
+      quick_test:
+        argv: ["python", "-m", "pytest", "-q"]
+      evaluate:
+        argv: ["python", "tools/evaluate.py"]
+    artifact_dirs: ["outputs", "results", "runs"]
+
+  thesis-ppt:
+    kind: presentation
+    root: "D:/Presentations/ThesisDefense"
+    repo: "YOUR_GITHUB_NAME/ThesisDefense"
+    allowed_commands: {}
+    artifact_dirs: []
+

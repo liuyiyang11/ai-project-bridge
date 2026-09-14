@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-project-bridge"
+version = "0.1.0"
+description = "A safe local bridge between GitHub Issues and Windows AI project execution."
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=1.10",
+  "PyYAML>=6.0",
+]
+
+[project.scripts]
+bridge = "bridge.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.setuptools.packages.find]
+include = ["bridge*"]
