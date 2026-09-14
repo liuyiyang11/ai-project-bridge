@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -14,11 +15,20 @@ class GhError(RuntimeError):
 
 
 def find_executable(name: str) -> str | None:
+    if Path(name).is_file():
+        return str(Path(name).resolve())
     found = shutil.which(name)
     if found:
         return found
     if name.lower() == "gh" and Path(r"C:\Program Files\GitHub CLI\gh.exe").is_file():
         return str(Path(r"C:\Program Files\GitHub CLI\gh.exe"))
+    if name.lower() in {"codex", "codex.exe"}:
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            install_root = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
+            candidates = [child / "codex.exe" for child in install_root.iterdir() if child.is_dir() and (child / "codex.exe").is_file()] if install_root.is_dir() else []
+            if candidates:
+                return str(max(candidates, key=lambda path: path.stat().st_mtime).resolve())
     return None
 
 

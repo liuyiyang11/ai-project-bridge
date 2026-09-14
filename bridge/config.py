@@ -105,6 +105,11 @@ def load_config(path: str | Path = "config.local.yaml") -> BridgeConfig:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         config = BridgeConfig.parse_obj(raw)
     except (OSError, yaml.YAMLError, ValidationError) as exc:
+        if isinstance(exc, yaml.YAMLError) and "double-quoted scalar" in str(exc) and "unknown escape" in str(exc):
+            raise ConfigError(
+                "invalid config: Windows paths inside YAML double quotes treat backslashes as escapes; "
+                "use single quotes, for example root: 'E:\\AI project bridge', or use forward slashes"
+            ) from exc
         raise ConfigError(f"invalid config: {exc}") from exc
     config.config_path = config_path
     for name, project in config.projects.items():

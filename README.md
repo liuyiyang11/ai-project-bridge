@@ -62,6 +62,8 @@ projects:
 
 `root` 是本机项目绝对路径，`repo` 是项目 GitHub repo。Issue 只能写 `project: unetmamba`，不能写 `root`、`cwd`、`repo`、命令或绝对路径。`allowed_commands` 的每个命令必须是预先注册的 argv 数组；Bridge 使用 `shell=False`。
 
+YAML 中的 Windows 反斜杠路径必须使用单引号，例如 `root: 'E:\\AI project bridge'`；也可以使用正斜杠，例如 `root: "E:/AI project bridge"`。不要把未转义的反斜杠放在 YAML 双引号中。
+
 项目 `kind` 必须与 Issue 的 task type 一致：`code`、`presentation` 或 `experiment-review`。建议先登记一个 demo repo，再登记真实科研项目。
 
 ## 4. 检查并初始化 GitHub labels
