@@ -1,0 +1,11 @@
+config.local.yaml
+.bridge/
+.worktrees/
+worktrees/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+github 令牌.txt
+
