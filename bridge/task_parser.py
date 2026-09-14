@@ -34,6 +34,8 @@ class BridgeTask(BaseModel):
     assets_dir: Optional[str] = None
     template: Optional[str] = None
     source_issue: Optional[StrictPositiveInt] = None
+    model: Optional[str] = None
+    reasoning_effort: Optional[str] = None
 
     @validator("project")
     def validate_project(cls, value: str) -> str:
@@ -53,6 +55,12 @@ class BridgeTask(BaseModel):
         if value is not None and (not value or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for char in value)):
             raise ValueError("command_id must be a safe identifier")
         return value
+
+    @validator("model", "reasoning_effort")
+    def validate_routing_value(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and (not value.strip() or len(value) > 200):
+            raise ValueError("model and reasoning_effort must be non-empty short strings")
+        return value.strip() if value is not None else None
 
     @root_validator(skip_on_failure=True)
     def validate_task_specific_fields(cls, values: dict) -> dict:

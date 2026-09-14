@@ -3,6 +3,10 @@ trusted_github_logins:
   - "YOUR-GITHUB-LOGIN"
 poll_seconds: 30
 
+codex:
+  backend: app-server
+  routing_policy: inherit
+
 limits:
   max_artifact_file_mb: 25
   max_bundle_mb: 100

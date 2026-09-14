@@ -1,8 +1,8 @@
-# AI Project Bridge V0.1
+# AI Project Bridge V0.2 (V0.1-compatible)
 
 AI Project Bridge 是一个运行在 Windows 11 本机的前台 Python 程序。它把 GitHub 私有仓库 Issue 作为任务总线，把需要推理和编辑的工作交给本地 Codex CLI，把测试、Git 检查、实验评估和 artifact 收集交给确定性脚本。
 
-Bridge 不执行远程 Issue 中的任意 shell、PowerShell、Python、绝对路径或环境变量。真实项目根目录和允许执行的 argv 只能来自本机、被 `.gitignore` 忽略的 `config.local.yaml`。
+Bridge 不执行远程 Issue 或 MCP 请求中的任意 shell、PowerShell、Python、绝对路径或环境变量。真实项目根目录和允许执行的 argv 只能来自本机、被 `.gitignore` 忽略的 `config.local.yaml`。GitHub Issue 仍然是兼容的任务入口；V0.2 另外提供 transport-independent Supervisor 和本地 MCP stdio adapter。
 
 ## 1. 安装
 
@@ -48,6 +48,10 @@ control_repo: "YOUR_NAME/ai-project-bridge"
 trusted_github_logins:
   - "YOUR-NAME"
 poll_seconds: 30
+
+codex:
+  backend: app-server       # app-server (default) or exec (V0.1 fallback)
+  routing_policy: inherit   # inherit or explicit
 
 limits:
   max_artifact_file_mb: 25
@@ -115,13 +119,19 @@ $Python = 'E:\anaconda\envs\py39\python.exe'
 - `task:code`
 - `status:ready`
 
-Bridge 会创建 `.bridge/worktrees/<project>-issue-<number>` 和 `ai/issue-<number>` branch，在 worktree 内调用当前 Codex CLI 的非交互形式：
+Bridge 默认在 worktree 内启动当前 Codex CLI 的原生 app-server session：
+
+```text
+codex app-server --stdio
+```
+
+如果 `codex.backend: exec`，则保留 V0.1 的非交互形式：
 
 ```text
 codex exec --json --sandbox workspace-write --approve-for-me --cd <worktree> -
 ```
 
-随后执行本地 `quick_test`（如果已配置），收集 Git status/diff，commit，push issue branch，并创建 Draft PR。不会 push `main`/`master`，不会自动 merge。
+随后执行本地 `quick_test`（如果已配置），收集 Git status/diff，commit，push issue branch，并创建 Draft PR。不会 push `main`/`master`，不会自动 merge。app-server 的 thread/turn ID 和安全事件会写入本地 TaskStore，Bridge 重启后可使用 `thread/resume`。
 
 ## 7. 创建 presentation task
 
@@ -207,7 +217,16 @@ $Python = 'E:\anaconda\envs\py39\python.exe'
 
 自动测试使用 fake runner/fake GitHub 和临时 demo Git repository，不消耗真实 Codex 用量。真实 Codex smoke test 应由用户在确认模型用量和目标 worktree 后自行决定；不要把真实科研项目作为第一轮测试目标。
 
-## 13. 安全边界
+## 13. 本地 MCP stdio
+
+```powershell
+$Python = 'E:\anaconda\envs\py39\python.exe'
+& $Python -m bridge --config config.local.yaml mcp-stdio
+```
+
+本地 MCP 只服务兼容 MCP 的客户端。普通 ChatGPT Plus 对话不能被假设为可以直接连接 local MCP，因此当前云端使用方式仍是 GitHub transport。工具列表和输入边界见 [docs/mcp-tools.md](docs/mcp-tools.md)。
+
+## 14. 安全边界
 
 - 只处理同时有 `ai-task` 与合法状态的 Issue，并要求恰好一个 task type label。
 - 严格 schema 校验，未知 `task_type`、未知字段、任意命令和非法路径都会拒绝。

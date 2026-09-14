@@ -11,8 +11,8 @@ from . import ExecutionContext
 
 
 class PresentationExecutor(CodeExecutor):
-    def __init__(self, runner=None, manager_factory=None, renderer: Optional[PresentationRenderer] = None, *, publish: bool = True):
-        super().__init__(runner, manager_factory, publish=publish)
+    def __init__(self, runner=None, manager_factory=None, renderer: Optional[PresentationRenderer] = None, *, publish: bool = True, session_manager: Any = None):
+        super().__init__(runner, manager_factory, publish=publish, session_manager=session_manager)
         self.renderer = renderer or PresentationRenderer()
 
     def execute(self, context: ExecutionContext, rework_instruction: Optional[str] = None) -> dict:

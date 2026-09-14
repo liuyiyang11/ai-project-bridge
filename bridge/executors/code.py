@@ -19,10 +19,11 @@ def _value(result: Any, name: str, default: Any = None) -> Any:
 
 
 class CodeExecutor:
-    def __init__(self, runner: Any = None, manager_factory: Optional[Callable[[ProjectConfig, Path], WorktreeManager]] = None, *, publish: bool = True):
+    def __init__(self, runner: Any = None, manager_factory: Optional[Callable[[ProjectConfig, Path], WorktreeManager]] = None, *, publish: bool = True, session_manager: Any = None):
         self.runner = runner
         self.manager_factory = manager_factory
         self.publish = publish
+        self.session_manager = session_manager
 
     def execute(self, context: ExecutionContext, rework_instruction: Optional[str] = None) -> dict:
         return self._execute_codex(context, self._prompt(context, rework_instruction), rework_instruction)
@@ -59,6 +60,7 @@ class CodeExecutor:
         manager = self._manager(context)
         info = manager.prepare(context.task.project, context.issue.number)
         context.store.update_state(context.issue.number, worktree_path=str(info.path), branch=info.branch, base_branch=info.base_branch, base_head=info.base_head)
+        session_manager = self.session_manager or getattr(context, "session_manager", None)
         runner = self.runner or context.runner
         state = context.store.load_state(context.issue.number)
         requested_thread_id = state.get("thread_id") if rework_instruction and state.get("thread_id") else None
@@ -66,7 +68,18 @@ class CodeExecutor:
         run_record = context.store.begin_run(context.issue.number, run_kind, requested_thread_id=requested_thread_id)
         events_path = context.store.task_dir(context.issue.number) / run_record["events_path"]
         try:
-            if requested_thread_id:
+            if session_manager is not None:
+                result = session_manager.run_task(
+                    str(context.issue.number),
+                    context.task.project,
+                    info.path,
+                    prompt,
+                    model=getattr(context.task, "model", None),
+                    reasoning_effort=getattr(context.task, "reasoning_effort", None),
+                    resume_thread_id=requested_thread_id,
+                    events_path=events_path,
+                )
+            elif requested_thread_id:
                 result = runner.resume_task(requested_thread_id, prompt, info.path, events_path)
             else:
                 result = runner.start_task(prompt, info.path, events_path)

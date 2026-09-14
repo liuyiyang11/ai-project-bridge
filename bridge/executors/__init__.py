@@ -21,4 +21,5 @@ class ExecutionContext:
     control_github: Any
     project_github: Any
     runner: Any
+    session_manager: Any = None
 

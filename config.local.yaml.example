@@ -3,6 +3,10 @@ control_repo: "YOUR_GITHUB_NAME/ai-project-bridge"
 trusted_github_logins:
   - "YOUR-GITHUB-NAME"
 poll_seconds: 30
+
+codex:
+  backend: app-server
+  routing_policy: inherit
 python_executable: 'E:\anaconda\envs\py39\python.exe'
 
 limits:

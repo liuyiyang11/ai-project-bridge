@@ -16,6 +16,8 @@ class ConfigError(ValueError):
 
 
 ProjectCapability = Literal["code", "presentation", "experiment-review"]
+CodexBackend = Literal["app-server", "exec"]
+CodexRoutingPolicy = Literal["inherit", "explicit"]
 
 
 class AllowedCommand(BaseModel):
@@ -109,6 +111,23 @@ class BundleLimits(BaseModel):
     max_images: int = Field(default=20, ge=0, le=1000)
 
 
+class CodexConfig(BaseModel):
+    """Codex execution policy.
+
+    ``app-server`` is the V0.2 default.  The legacy ``exec`` backend remains
+    available as an explicit compatibility fallback for existing deployments.
+    """
+
+    class Config:
+        extra = "forbid"
+
+    backend: CodexBackend = "app-server"
+    routing_policy: CodexRoutingPolicy = "inherit"
+    initialize_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    request_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    turn_timeout_seconds: int = Field(default=86400, ge=1, le=604800)
+
+
 class BridgeConfig(BaseModel):
     class Config:
         extra = "forbid"
@@ -118,6 +137,7 @@ class BridgeConfig(BaseModel):
     poll_seconds: int = Field(default=30, ge=1, le=86400)
     projects: dict[str, ProjectConfig] = Field(default_factory=dict)
     limits: BundleLimits = Field(default_factory=BundleLimits)
+    codex: CodexConfig = Field(default_factory=CodexConfig)
     state_dir: str = ".bridge"
     gh_binary: str = "gh"
     codex_binary: str = "codex"

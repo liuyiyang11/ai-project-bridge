@@ -19,14 +19,15 @@ ACTIVE_STATUSES = {"running", "review", "approved"}
 
 
 class Dispatcher:
-    def __init__(self, config: BridgeConfig, github: Any, *, store: Optional[TaskStore] = None, runner: Any = None, executors: Optional[dict[str, Any]] = None):
+    def __init__(self, config: BridgeConfig, github: Any, *, store: Optional[TaskStore] = None, runner: Any = None, session_manager: Any = None, executors: Optional[dict[str, Any]] = None):
         self.config = config
         self.github: Any = github
         self.store = store or TaskStore(config.state_root)
         self.runner = runner
+        self.session_manager = session_manager
         self.executors = executors or {
-            "code": CodeExecutor(runner=runner),
-            "presentation": PresentationExecutor(runner=runner),
+            "code": CodeExecutor(runner=runner, session_manager=session_manager),
+            "presentation": PresentationExecutor(runner=runner, session_manager=session_manager),
             "experiment-review": ExperimentReviewExecutor(),
         }
 
@@ -130,6 +131,7 @@ class Dispatcher:
             self.github,
             self.github.for_repo(project.repo),
             self.runner,
+            self.session_manager,
         )
         try:
             result = executor.execute(context, rework_instruction=rework_instruction)

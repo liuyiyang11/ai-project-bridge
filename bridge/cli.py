@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from .collectors.presentation_renderer import PresentationRenderer
 from .config import ConfigError, load_config
 from .codex.runner import CodexRunner
+from .codex.session import CodexSessionManager
 from .dispatcher import Dispatcher
 from .github import GhClient, GhError, find_executable
 from .task_store import TaskStore
@@ -39,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("doctor", "run", "run-once", "setup-github"):
         sub = commands.add_parser(name)
         sub.add_argument("--config", dest="command_config", default=None)
+    mcp = commands.add_parser("mcp-stdio", help="serve the local MCP tool surface over stdio")
+    mcp.add_argument("--config", dest="command_config", default=None)
     show = commands.add_parser("show-task")
     show.add_argument("issue_number", type=int)
     show.add_argument("--config", dest="command_config", default=None)
@@ -64,6 +67,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         return retry(config, args.issue_number)
     if args.command == "setup-github":
         return setup_github(config)
+    if args.command == "mcp-stdio":
+        from .mcp.server import McpStdioServer
+        from .mcp.tools import BridgeMcpTools
+
+        McpStdioServer(BridgeMcpTools(config=config)).serve()
+        return 0
     if args.command in {"run", "run-once"}:
         return run_bridge(config, once=args.command == "run-once")
     return 2
@@ -209,8 +218,14 @@ def run_bridge(config, *, once: bool) -> int:
     try:
         validate_project_repositories(config)
         github = make_github_client(config)
-        runner = CodexRunner(config.codex_binary)
-        dispatcher = Dispatcher(config, github, runner=runner)
+        store = TaskStore(config.state_root)
+        if config.codex.backend == "app-server":
+            runner = None
+            session_manager = CodexSessionManager(config, store=store)
+        else:
+            runner = CodexRunner(config.codex_binary)
+            session_manager = None
+        dispatcher = Dispatcher(config, github, store=store, runner=runner, session_manager=session_manager)
         if once:
             print(json.dumps(dispatcher.run_once(), ensure_ascii=False, indent=2))
             return 0
