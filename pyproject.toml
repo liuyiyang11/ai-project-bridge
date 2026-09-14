@@ -6,11 +6,14 @@ build-backend = "setuptools.build_meta"
 name = "ai-project-bridge"
 version = "0.1.0"
 description = "A safe local bridge between GitHub Issues and Windows AI project execution."
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = [
   "pydantic>=1.10",
   "PyYAML>=6.0",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
 
 [project.scripts]
 bridge = "bridge.cli:main"

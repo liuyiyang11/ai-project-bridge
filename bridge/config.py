@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+import sys
+from typing import Literal, Optional, Union
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, validator
@@ -71,6 +72,7 @@ class BridgeConfig(BaseModel):
     state_dir: str = ".bridge"
     gh_binary: str = "gh"
     codex_binary: str = "codex"
+    python_executable: Optional[Path] = None
     config_path: Path = Field(default=Path("config.local.yaml"), exclude=True)
 
     @validator("control_repo")
@@ -97,7 +99,7 @@ class BridgeConfig(BaseModel):
         return (self.config_path.parent / self.state_dir).resolve()
 
 
-def load_config(path: str | Path = "config.local.yaml") -> BridgeConfig:
+def load_config(path: Union[str, Path] = "config.local.yaml") -> BridgeConfig:
     config_path = Path(path).expanduser().resolve()
     if not config_path.is_file():
         raise ConfigError(f"config file not found: {config_path}")
@@ -116,4 +118,6 @@ def load_config(path: str | Path = "config.local.yaml") -> BridgeConfig:
         if not name or name in {".", ".."} or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for char in name):
             raise ConfigError(f"unsafe project name: {name!r}")
         project.root = project.root.expanduser().resolve()
+    if config.python_executable is not None:
+        config.python_executable = config.python_executable.expanduser().resolve()
     return config

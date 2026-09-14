@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from .config import BridgeConfig, ConfigError
 from .executors import ExecutionContext
@@ -19,9 +19,9 @@ ACTIVE_STATUSES = {"running", "review", "approved"}
 
 
 class Dispatcher:
-    def __init__(self, config: BridgeConfig, github: Any, *, store: TaskStore | None = None, runner: Any = None, executors: dict[str, Any] | None = None):
+    def __init__(self, config: BridgeConfig, github: Any, *, store: Optional[TaskStore] = None, runner: Any = None, executors: Optional[dict[str, Any]] = None):
         self.config = config
-        self.github: GhClient | Any = github
+        self.github: Any = github
         self.store = store or TaskStore(config.state_root)
         self.runner = runner
         self.executors = executors or {
@@ -43,7 +43,7 @@ class Dispatcher:
                 outcomes.append(outcome)
         return outcomes
 
-    def _process_issue(self, issue: Issue) -> dict | None:
+    def _process_issue(self, issue: Issue) -> Optional[dict]:
         status = self._status(issue.labels)
         if status == "ready":
             return self._process_new(issue)
@@ -51,7 +51,7 @@ class Dispatcher:
             return self._process_rework(issue)
         return None
 
-    def _process_new(self, issue: Issue) -> dict | None:
+    def _process_new(self, issue: Issue) -> Optional[dict]:
         if self.store.exists(issue.number):
             state = self.store.load_state(issue.number)
             if state.get("status") in ACTIVE_STATUSES or state.get("status") == "failed":
@@ -74,7 +74,7 @@ class Dispatcher:
         self.github.comment(issue.number, "Bridge accepted this task and started local execution.")
         return self._execute(issue, task, project, rework_instruction=None)
 
-    def _process_rework(self, issue: Issue) -> dict | None:
+    def _process_rework(self, issue: Issue) -> Optional[dict]:
         if not self.store.exists(issue.number):
             return None
         state = self.store.load_state(issue.number)
@@ -99,7 +99,7 @@ class Dispatcher:
                 return self._record_failure(issue, exc, preserve_review=False)
         return None
 
-    def _execute(self, issue: Issue, task: Any, project: Any, rework_instruction: str | None) -> dict:
+    def _execute(self, issue: Issue, task: Any, project: Any, rework_instruction: Optional[str]) -> dict:
         executor = self.executors[task.task_type]
         context = ExecutionContext(self.config, issue, task, project, self.store, self.store.task_dir(issue.number), self.github, self.runner)
         try:
@@ -158,7 +158,7 @@ class Dispatcher:
             )
 
     @staticmethod
-    def _status(labels: set[str]) -> str | None:
+    def _status(labels: set[str]) -> Optional[str]:
         statuses = [label.removeprefix("status:") for label in labels if label in {f"status:{name}" for name in ("ready", "running", "review", "failed", "approved")}]
         return statuses[0] if len(statuses) == 1 else None
 

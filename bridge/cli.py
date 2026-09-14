@@ -6,6 +6,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from typing import Optional, Union
 
 from .collectors.presentation_renderer import PresentationRenderer
 from .config import ConfigError, load_config
@@ -44,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     config_path = args.command_config or args.config or "config.local.yaml"
     if args.command == "doctor":
@@ -70,9 +71,9 @@ def make_github_client(config):
     return GhClient(binary, config.control_repo)
 
 
-def doctor(config_path: str | Path) -> int:
+def doctor(config_path: Union[str, Path]) -> int:
     checks: list[tuple[str, bool, str]] = []
-    checks.append(("Python", sys.version_info >= (3, 11), sys.version.split()[0]))
+    checks.append(("Python", sys.version_info >= (3, 9), sys.version.split()[0]))
     checks.append(("Git", bool(shutil.which("git")), shutil.which("git") or "not found"))
     gh_binary = find_executable("gh")
     checks.append(("GitHub CLI", gh_binary is not None, gh_binary or "not found"))
@@ -93,6 +94,8 @@ def doctor(config_path: str | Path) -> int:
     except ConfigError as exc:
         checks.append(("Configuration", False, str(exc)))
     if config:
+        if config.python_executable:
+            checks.append(("Configured Python", config.python_executable.is_file(), str(config.python_executable)))
         for name, project in config.projects.items():
             is_git = project.root.is_dir() and (subprocess_git_ok(project.root))
             checks.append((f"Project {name}", is_git, f"{project.root} ({project.repo})" if is_git else f"not a Git repository: {project.root}"))

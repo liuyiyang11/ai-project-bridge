@@ -18,6 +18,6 @@ class ExecutionContext:
     project: ProjectConfig
     store: TaskStore
     task_dir: Path
-    github: GhClient | Any
+    github: Any
     runner: Any
 

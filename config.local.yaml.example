@@ -1,6 +1,7 @@
 # Copy this file to config.local.yaml. Keep the copy private and ignored.
 control_repo: "YOUR_GITHUB_NAME/ai-project-bridge"
 poll_seconds: 30
+python_executable: 'E:\anaconda\envs\py39\python.exe'
 
 limits:
   max_artifact_file_mb: 25

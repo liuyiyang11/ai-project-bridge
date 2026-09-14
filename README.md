@@ -9,7 +9,7 @@ Bridge 不执行远程 Issue 中的任意 shell、PowerShell、Python、绝对�
 要求：
 
 - Windows 11
-- Python 3.11+
+- Python 3.9+
 - Git
 - GitHub CLI `gh`
 - 已登录的 Codex CLI
@@ -18,7 +18,8 @@ Bridge 不执行远程 Issue 中的任意 shell、PowerShell、Python、绝对�
 在仓库根目录执行：
 
 ```powershell
-python -m pip install -e .
+$Python = 'E:\anaconda\envs\py39\python.exe'
+& $Python -m pip install -e '.[test]'
 Copy-Item config.local.yaml.example config.local.yaml
 ```
 
@@ -62,15 +63,18 @@ projects:
 
 `root` 是本机项目绝对路径，`repo` 是项目 GitHub repo。Issue 只能写 `project: unetmamba`，不能写 `root`、`cwd`、`repo`、命令或绝对路径。`allowed_commands` 的每个命令必须是预先注册的 argv 数组；Bridge 使用 `shell=False`。
 
-YAML 中的 Windows 反斜杠路径必须使用单引号，例如 `root: 'E:\\AI project bridge'`；也可以使用正斜杠，例如 `root: "E:/AI project bridge"`。不要把未转义的反斜杠放在 YAML 双引号中。
+`python_executable` 用于指定 Bridge 执行本地 Python 命令的解释器。本机配置已设为 `E:\anaconda\envs\py39\python.exe`；即使 `allowed_commands.argv` 写的是 `python`，Bridge 也会替换为该解释器。
+
+YAML 中的 Windows 反斜杠路径必须使用单引号，例如 `root: 'E:\AI project bridge'`；也可以使用正斜杠，例如 `root: "E:/AI project bridge"`。不要把未转义的反斜杠放在 YAML 双引号中。
 
 项目 `kind` 必须与 Issue 的 task type 一致：`code`、`presentation` 或 `experiment-review`。建议先登记一个 demo repo，再登记真实科研项目。
 
 ## 4. 检查并初始化 GitHub labels
 
 ```powershell
-python -m bridge --config config.local.yaml doctor
-python -m bridge --config config.local.yaml setup-github
+$Python = 'E:\anaconda\envs\py39\python.exe'
+& $Python -m bridge --config config.local.yaml doctor
+& $Python -m bridge --config config.local.yaml setup-github
 ```
 
 `setup-github` 只创建不存在的标签，不删除已有标签：
@@ -82,13 +86,15 @@ python -m bridge --config config.local.yaml setup-github
 只扫描一次：
 
 ```powershell
-python -m bridge --config config.local.yaml run-once
+$Python = 'E:\anaconda\envs\py39\python.exe'
+& $Python -m bridge --config config.local.yaml run-once
 ```
 
 持续轮询：
 
 ```powershell
-python -m bridge --config config.local.yaml run
+$Python = 'E:\anaconda\envs\py39\python.exe'
+& $Python -m bridge --config config.local.yaml run
 ```
 
 按 `Ctrl+C` 停止前台进程。V0.1 不安装 Windows Service。
@@ -166,14 +172,16 @@ Bridge 读取最新且尚未处理的 comment，使用 `state.json` 中保存的
 查看任务：
 
 ```powershell
-python -m bridge --config config.local.yaml show-task 123
+$Python = 'E:\anaconda\envs\py39\python.exe'
+& $Python -m bridge --config config.local.yaml show-task 123
 ```
 
 修复本地配置、项目 Git 状态或依赖后重试：
 
 ```powershell
-python -m bridge --config config.local.yaml retry 123
-python -m bridge --config config.local.yaml run-once
+$Python = 'E:\anaconda\envs\py39\python.exe'
+& $Python -m bridge --config config.local.yaml retry 123
+& $Python -m bridge --config config.local.yaml run-once
 ```
 
 `status:failed` 任务不会在每次轮询中自动重复；必须显式 `retry`。Bridge 不会删除用户项目根目录，也不会强制覆盖项目的 `AGENTS.md`。
@@ -181,8 +189,9 @@ python -m bridge --config config.local.yaml run-once
 ## 12. 测试与验证
 
 ```powershell
-python -m bridge doctor
-python -m pytest
+$Python = 'E:\anaconda\envs\py39\python.exe'
+& $Python -m bridge doctor
+& $Python -m pytest
 ```
 
 自动测试使用 fake runner/fake GitHub 和临时 demo Git repository，不消耗真实 Codex 用量。真实 Codex smoke test 应由用户在确认模型用量和目标 worktree 后自行决定；不要把真实科研项目作为第一轮测试目标。

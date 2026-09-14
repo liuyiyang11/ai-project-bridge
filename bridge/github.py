@@ -7,14 +7,14 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Optional
 
 
 class GhError(RuntimeError):
     """Raised for unavailable or failed GitHub CLI operations."""
 
 
-def find_executable(name: str) -> str | None:
+def find_executable(name: str) -> Optional[str]:
     if Path(name).is_file():
         return str(Path(name).resolve())
     found = shutil.which(name)
@@ -53,12 +53,12 @@ _STATUS_LABELS = {"status:ready", "status:running", "status:review", "status:fai
 
 
 class GhClient:
-    def __init__(self, binary: str, repo: str, run: Callable[..., subprocess.CompletedProcess[str]] | None = None):
+    def __init__(self, binary: str, repo: str, run: Optional[Callable[..., subprocess.CompletedProcess[str]]] = None):
         self.binary = binary
         self.repo = repo
         self._run_fn = run or subprocess.run
 
-    def _run(self, args: Iterable[str], *, input: str | None = None) -> subprocess.CompletedProcess[str]:
+    def _run(self, args: Iterable[str], *, input: Optional[str] = None) -> subprocess.CompletedProcess[str]:
         argv = [self.binary, *args]
         try:
             result = self._run_fn(argv, input=input, capture_output=True, text=True, encoding="utf-8", errors="replace", shell=False, check=False)

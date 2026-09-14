@@ -5,7 +5,7 @@ import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from ..github import find_executable
 
@@ -17,7 +17,7 @@ class CodexUnavailableError(RuntimeError):
 @dataclass(frozen=True)
 class CodexResult:
     task_id: str
-    thread_id: str | None
+    thread_id: Optional[str]
     exit_code: int
     final_message: str
     events_path: Path
@@ -26,12 +26,12 @@ class CodexResult:
 
 
 class CodexRunner:
-    def __init__(self, binary: str = "codex", popen: Callable[..., Any] | None = None, available: bool | None = None):
+    def __init__(self, binary: str = "codex", popen: Optional[Callable[..., Any]] = None, available: Optional[bool] = None):
         self.binary = binary
         self._popen = popen or subprocess.Popen
         self._available = find_executable(binary) is not None if available is None else available
 
-    def start_task(self, prompt: str, cwd: Path, events_path: Path, *, final_file: Path | None = None) -> CodexResult:
+    def start_task(self, prompt: str, cwd: Path, events_path: Path, *, final_file: Optional[Path] = None) -> CodexResult:
         command = [
             self.binary,
             "exec",
@@ -48,7 +48,7 @@ class CodexRunner:
         ]
         return self._run(command, prompt, cwd, events_path, final_file)
 
-    def resume_task(self, thread_id: str, prompt: str, cwd: Path, events_path: Path, *, final_file: Path | None = None) -> CodexResult:
+    def resume_task(self, thread_id: str, prompt: str, cwd: Path, events_path: Path, *, final_file: Optional[Path] = None) -> CodexResult:
         command = [
             self.binary,
             "exec",
@@ -61,7 +61,7 @@ class CodexRunner:
         ]
         return self._run(command, prompt, cwd, events_path, final_file)
 
-    def _run(self, command: list[str], prompt: str, cwd: Path, events_path: Path, final_file: Path | None) -> CodexResult:
+    def _run(self, command: list[str], prompt: str, cwd: Path, events_path: Path, final_file: Optional[Path]) -> CodexResult:
         if not self._available:
             raise CodexUnavailableError("Codex CLI is not available; install it or update codex_binary")
         events_path.parent.mkdir(parents=True, exist_ok=True)
@@ -106,7 +106,7 @@ class CodexRunner:
         return parsed
 
     @classmethod
-    def _find_thread_id(cls, events: list[dict[str, Any]]) -> str | None:
+    def _find_thread_id(cls, events: list[dict[str, Any]]) -> Optional[str]:
         for event in events:
             found = cls._find_value(event, {"thread_id", "threadId", "session_id", "sessionId"})
             if found:

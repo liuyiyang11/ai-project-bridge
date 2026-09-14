@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -27,3 +28,16 @@ def test_config_yaml_windows_double_quote_error_has_actionable_hint(tmp_path):
     with pytest.raises(ConfigError, match="single quotes"):
         load_config(config_path)
 
+
+def test_py39_can_start_bridge_cli():
+    python = Path(r"E:\anaconda\envs\py39\python.exe")
+    result = subprocess.run([str(python), "-m", "bridge", "--help"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+    assert result.returncode == 0, result.stderr
+    assert "run-once" in result.stdout
+
+
+def test_windows_scripts_pin_py39():
+    for name in ("install.ps1", "doctor.ps1", "run.ps1"):
+        content = (Path("scripts") / name).read_text(encoding="utf-8")
+        assert r"E:\anaconda\envs\py39\python.exe" in content

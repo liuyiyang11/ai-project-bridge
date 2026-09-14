@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 from ..collectors.presentation_renderer import PresentationRenderer
 from ..security import resolve_under
@@ -9,11 +10,11 @@ from . import ExecutionContext
 
 
 class PresentationExecutor(CodeExecutor):
-    def __init__(self, runner=None, manager_factory=None, renderer: PresentationRenderer | None = None, *, publish: bool = True):
+    def __init__(self, runner=None, manager_factory=None, renderer: Optional[PresentationRenderer] = None, *, publish: bool = True):
         super().__init__(runner, manager_factory, publish=publish)
         self.renderer = renderer or PresentationRenderer()
 
-    def execute(self, context: ExecutionContext, rework_instruction: str | None = None) -> dict:
+    def execute(self, context: ExecutionContext, rework_instruction: Optional[str] = None) -> dict:
         prompt = self._presentation_prompt(context, rework_instruction)
         result = self._execute_codex(context, prompt, rework_instruction)
         state = context.store.load_state(context.issue.number)
@@ -27,7 +28,7 @@ class PresentationExecutor(CodeExecutor):
         result["artifact_list"] = [{"path": f"presentation/{key}", "kind": "presentation"} for key in ("final_pptx", "final_pdf") if render_result.get(key)]
         return result
 
-    def _presentation_prompt(self, context: ExecutionContext, rework_instruction: str | None) -> str:
+    def _presentation_prompt(self, context: ExecutionContext, rework_instruction: Optional[str]) -> str:
         task = context.task
         root = context.project.root
         files = []

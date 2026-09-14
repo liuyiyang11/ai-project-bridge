@@ -4,6 +4,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 
 class WorktreeError(RuntimeError):
@@ -25,7 +26,7 @@ class WorktreeManager:
         self.repo_root = Path(repo_root).resolve()
         self.worktree_root = Path(worktree_root).resolve()
 
-    def _git(self, args: list[str], cwd: Path | None = None, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def _git(self, args: list[str], cwd: Optional[Path] = None, *, check: bool = True) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(["git", *args], cwd=cwd or self.repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace", shell=False, check=False)
         if check and result.returncode != 0:
             detail = (result.stderr or result.stdout or "git command failed").strip()

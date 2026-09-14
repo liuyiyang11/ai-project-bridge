@@ -3,8 +3,9 @@ param(
   [string]$Config = "config.local.yaml"
 )
 $ErrorActionPreference = "Stop"
+$Python = 'E:\anaconda\envs\py39\python.exe'
 if ($Once) {
-  python -m bridge --config $Config run-once
+  & $Python -m bridge --config $Config run-once
 } else {
-  python -m bridge --config $Config run
+  & $Python -m bridge --config $Config run
 }

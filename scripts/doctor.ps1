@@ -1,3 +1,4 @@
 $ErrorActionPreference = "Stop"
-python -m bridge doctor
+$Python = 'E:\anaconda\envs\py39\python.exe'
+& $Python -m bridge doctor
 

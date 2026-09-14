@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, root_validator, validator
@@ -16,20 +16,20 @@ class TaskParseError(ValueError):
 class BridgeTask(BaseModel):
     class Config:
         extra = "forbid"
-        anystr_strip_whitespace = True
+        str_strip_whitespace = True
 
     version: Literal[1]
     task_type: Literal["code", "presentation", "experiment-review"]
     project: str
     title: str = Field(min_length=1, max_length=200)
-    goal: str | None = None
-    instructions: str | None = None
+    goal: Optional[str] = None
+    instructions: Optional[str] = None
     acceptance: list[str] = Field(default_factory=list)
-    command_id: str | None = None
-    brief: str | None = None
-    slides_spec: str | None = None
-    assets_dir: str | None = None
-    template: str | None = None
+    command_id: Optional[str] = None
+    brief: Optional[str] = None
+    slides_spec: Optional[str] = None
+    assets_dir: Optional[str] = None
+    template: Optional[str] = None
 
     @validator("project")
     def validate_project(cls, value: str) -> str:
@@ -45,12 +45,12 @@ class BridgeTask(BaseModel):
         return value
 
     @validator("command_id")
-    def validate_command_id(cls, value: str | None) -> str | None:
+    def validate_command_id(cls, value: Optional[str]) -> Optional[str]:
         if value is not None and (not value or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for char in value)):
             raise ValueError("command_id must be a safe identifier")
         return value
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def validate_task_specific_fields(cls, values: dict) -> dict:
         task_type = values.get("task_type")
         paths = {

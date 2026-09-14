@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from typing import Optional
 
 from ..commands import run_registered_command
 from ..collectors.artifact_collector import collect_artifacts
@@ -19,15 +20,15 @@ class SampleSelector:
 
 
 class ExperimentReviewExecutor:
-    def __init__(self, sample_selector: SampleSelector | None = None, manager_factory=None, *, publish: bool = True):
+    def __init__(self, sample_selector: Optional[SampleSelector] = None, manager_factory=None, *, publish: bool = True):
         self.sample_selector = sample_selector or SampleSelector()
         self.manager_factory = manager_factory
         self.publish = publish
 
-    def execute(self, context: ExecutionContext, rework_instruction: str | None = None) -> dict:
+    def execute(self, context: ExecutionContext, rework_instruction: Optional[str] = None) -> dict:
         if rework_instruction:
             raise RuntimeError("experiment-review tasks do not resume Codex threads in V0.1")
-        command_result = run_registered_command(context.project, context.task.command_id or "", context.project.root)
+        command_result = run_registered_command(context.project, context.task.command_id or "", context.project.root, context.config.python_executable)
         context.store.append_stdout(context.issue.number, command_result.stdout or "")
         context.store.append_stderr(context.issue.number, command_result.stderr or "")
         tests = [{"command_id": context.task.command_id, "returncode": command_result.returncode, "stdout": command_result.stdout[-4000:], "stderr": command_result.stderr[-4000:]}]
@@ -64,7 +65,7 @@ class ExperimentReviewExecutor:
             "known_limitations": limitation,
         }
 
-    def _publish_bundle(self, context: ExecutionContext, bundle_dir: Path) -> str | None:
+    def _publish_bundle(self, context: ExecutionContext, bundle_dir: Path) -> Optional[str]:
         total_bytes = sum(path.stat().st_size for path in bundle_dir.rglob("*") if path.is_file())
         max_bytes = context.config.limits.max_bundle_mb * 1024 * 1024
         if total_bytes > max_bytes:

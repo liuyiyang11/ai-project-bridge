@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from ..collectors.git_collector import collect_git_state
 from ..commands import run_registered_command
@@ -18,15 +18,15 @@ def _value(result: Any, name: str, default: Any = None) -> Any:
 
 
 class CodeExecutor:
-    def __init__(self, runner: Any = None, manager_factory: Callable[[ProjectConfig, Path], WorktreeManager] | None = None, *, publish: bool = True):
+    def __init__(self, runner: Any = None, manager_factory: Optional[Callable[[ProjectConfig, Path], WorktreeManager]] = None, *, publish: bool = True):
         self.runner = runner
         self.manager_factory = manager_factory
         self.publish = publish
 
-    def execute(self, context: ExecutionContext, rework_instruction: str | None = None) -> dict:
+    def execute(self, context: ExecutionContext, rework_instruction: Optional[str] = None) -> dict:
         return self._execute_codex(context, self._prompt(context, rework_instruction), rework_instruction)
 
-    def _prompt(self, context: ExecutionContext, rework_instruction: str | None) -> str:
+    def _prompt(self, context: ExecutionContext, rework_instruction: Optional[str]) -> str:
         task = context.task
         parts = [
             "You are executing a validated AI Project Bridge task in the current workspace.",
@@ -45,7 +45,7 @@ class CodeExecutor:
             return self.manager_factory(context.project, context.config.state_root / "worktrees")
         return WorktreeManager(context.project.root, context.config.state_root / "worktrees")
 
-    def _execute_codex(self, context: ExecutionContext, prompt: str, rework_instruction: str | None) -> dict:
+    def _execute_codex(self, context: ExecutionContext, prompt: str, rework_instruction: Optional[str]) -> dict:
         manager = self._manager(context)
         info = manager.prepare(context.task.project, context.issue.number)
         context.store.update_state(context.issue.number, worktree_path=str(info.path), branch=info.branch, base_branch=info.base_branch, base_head=info.base_head)
@@ -66,7 +66,7 @@ class CodeExecutor:
         tests: list[dict] = []
         quick_test = context.project.allowed_commands.get("quick_test")
         if quick_test:
-            command_result = run_registered_command(context.project, "quick_test", info.path)
+            command_result = run_registered_command(context.project, "quick_test", info.path, context.config.python_executable)
             context.store.append_stdout(context.issue.number, command_result.stdout or "")
             context.store.append_stderr(context.issue.number, command_result.stderr or "")
             tests.append({"command_id": "quick_test", "returncode": command_result.returncode, "stdout": command_result.stdout[-4000:], "stderr": command_result.stderr[-4000:]})

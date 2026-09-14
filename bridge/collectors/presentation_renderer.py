@@ -5,6 +5,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from ..github import find_executable
 
@@ -42,7 +43,7 @@ class PresentationRenderer:
         final_pptx = output_dir / "final.pptx"
         shutil.copy2(pptx_path, final_pptx)
         capabilities = self.detect_capabilities()
-        pdf_path: Path | None = None
+        pdf_path: Optional[Path] = None
         errors: list[str] = []
         if capabilities.powerpoint_com:
             try:
@@ -82,7 +83,7 @@ class PresentationRenderer:
         return pdf_path
 
     @staticmethod
-    def _render_libreoffice(pptx_path: Path, output_dir: Path) -> Path | None:
+    def _render_libreoffice(pptx_path: Path, output_dir: Path) -> Optional[Path]:
         executable = find_executable("soffice") or find_executable("libreoffice")
         if not executable:
             return None

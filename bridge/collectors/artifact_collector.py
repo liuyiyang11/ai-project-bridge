@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Optional, Set
 
 from ..config import BundleLimits
 from ..security import resolve_under
@@ -18,8 +19,8 @@ def collect_artifacts(
     destination: Path,
     limits: BundleLimits,
     *,
-    file_size_bytes: int | None = None,
-    extra_extensions: set[str] | None = None,
+    file_size_bytes: Optional[int] = None,
+    extra_extensions: Optional[Set[str]] = None,
 ) -> list[dict]:
     project_root = Path(project_root).resolve()
     destination = Path(destination).resolve()

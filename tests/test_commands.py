@@ -33,6 +33,27 @@ def test_registered_command_runs_without_shell(tmp_path, monkeypatch):
     assert calls[0][1]["cwd"] == tmp_path
 
 
+def test_registered_python_command_uses_configured_interpreter(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr("bridge.commands.subprocess.run", fake_run)
+    project = ProjectConfig(
+        kind="code",
+        root=tmp_path,
+        repo="owner/demo",
+        allowed_commands={"quick_test": {"argv": ["python", "-m", "pytest", "-q"]}},
+    )
+    configured_python = Path(r"E:\anaconda\envs\py39\python.exe")
+
+    run_registered_command(project, "quick_test", tmp_path, configured_python)
+
+    assert calls[0][0][0] == str(configured_python.resolve())
+
+
 def test_unknown_registered_command_is_rejected(tmp_path):
     project = ProjectConfig(kind="code", root=tmp_path, repo="owner/demo")
     with pytest.raises(CommandExecutionError, match="not allowed"):
