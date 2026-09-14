@@ -12,7 +12,7 @@ Bridge 不执行远程 Issue 中的任意 shell、PowerShell、Python、绝对�
 - Python 3.9+
 - Git
 - GitHub CLI `gh`
-- 已登录的 Codex CLI
+- 已登录的 Codex CLI 或 Codex Desktop（Desktop bundled `codex.exe` 会自动探测，无需手工加入 PATH）
 - 可选：Microsoft PowerPoint 或 LibreOffice，用于 PPT 渲染
 
 在仓库根目录执行：
@@ -43,6 +43,8 @@ Bridge 不读取 token 文件、Codex auth 文件、SSH key、浏览器数据或
 
 ```yaml
 control_repo: "YOUR_NAME/ai-project-bridge"
+trusted_github_logins:
+  - "YOUR_NAME"
 poll_seconds: 30
 
 limits:
@@ -52,7 +54,7 @@ limits:
 
 projects:
   unetmamba:
-    kind: code
+    capabilities: [code, experiment-review]
     root: "D:/Projects/UNetMamba"
     repo: "YOUR_NAME/UNetMamba"
     allowed_commands:
@@ -67,7 +69,9 @@ projects:
 
 YAML 中的 Windows 反斜杠路径必须使用单引号，例如 `root: 'E:\AI project bridge'`；也可以使用正斜杠，例如 `root: "E:/AI project bridge"`。不要把未转义的反斜杠放在 YAML 双引号中。
 
-项目 `kind` 必须与 Issue 的 task type 一致：`code`、`presentation` 或 `experiment-review`。建议先登记一个 demo repo，再登记真实科研项目。
+项目通过 `capabilities` 声明允许的 task type：`code`、`presentation`、`experiment-review`；例如科研项目可同时声明 `code` 和 `experiment-review`。旧版单一 `kind` 仍会自动迁移为单元素 capabilities，便于渐进升级。
+
+`control_repo` 只承载任务 Issue、状态标签和评论；项目 `repo` 只来自本地配置，负责 `ai/issue-N` 分支和 Draft PR。项目 PR 只会写 `Control task: OWNER/ai-project-bridge#N`，不会使用 `Closes #N` 关闭项目仓库的同号 Issue。
 
 ## 4. 检查并初始化 GitHub labels
 
@@ -117,7 +121,7 @@ codex exec --json --sandbox workspace-write --ask-for-approval never --cd <workt
 
 ## 7. 创建 presentation task
 
-登记 `kind: presentation` 项目，在 Issue 中使用 `examples/presentation-task.md`。`brief`、`slides_spec`、`assets_dir`、`template` 都必须是项目 root 下的相对路径。
+登记 `capabilities: [presentation]` 项目，在 Issue 中使用 `examples/presentation-task.md`。`brief`、`slides_spec`、`assets_dir`、`template` 都必须是项目 root 下的相对路径。
 
 Codex 在隔离 worktree 中生成/修改 PPTX。Bridge 会复制 `final.pptx` 到 review bundle，并在 Windows 上优先尝试 PowerPoint COM；不可用时尝试 LibreOffice。每次 doctor 会报告当前检测到的渲染能力。V0.1 不从网络下载未知二进制素材。
 
@@ -165,7 +169,7 @@ instruction: |
 ```
 ```
 
-Bridge 读取最新且尚未处理的 comment，使用 `state.json` 中保存的 Codex thread/session id 调用 `codex exec resume <SESSION_ID> - --json`，复用同一个 worktree 和 branch，重新测试并更新原 Draft PR。comment id 会持久化，重复扫描不会重复返工。
+Bridge 只接受 `trusted_github_logins` 中 GitHub 用户提交的 rework comment；未受信任的 comment 会被忽略，不调用 Codex，也不会把任务标为失败。对带有 author 信息的任务 Issue，配置了 trusted list 时也会进行同样的校验。可信 rework 会使用 `state.json` 中保存的 Codex thread/session id 调用 `codex exec resume <SESSION_ID> - --json`，复用同一个 worktree 和 branch，重新测试并更新原 Draft PR。comment id 会持久化，重复扫描不会重复返工。
 
 ## 11. 出错恢复
 

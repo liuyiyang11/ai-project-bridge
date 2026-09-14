@@ -78,5 +78,5 @@ class ExperimentReviewExecutor:
         shutil.copytree(bundle_dir, target)
         manager.commit(info.path, f"ai: issue {context.issue.number} experiment review")
         manager.push(info.path, info.branch)
-        body = f"Closes #{context.issue.number}\n\nBounded experiment review bundle for `{context.task.project}`.\n\nBundle size: {total_bytes} bytes.\n\nNo automatic merge is performed.\n"
-        return context.github.create_draft_pr(info.branch, info.base_branch, f"Review: {context.task.title}", body)
+        body = f"Control task: {context.config.control_repo}#{context.issue.number}\n\nBounded experiment review bundle for `{context.task.project}`.\n\nBundle size: {total_bytes} bytes.\n\nNo automatic merge is performed.\n"
+        return context.project_github.create_draft_pr(info.branch, info.base_branch, f"Review: {context.task.title}", body)

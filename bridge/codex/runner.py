@@ -28,12 +28,16 @@ class CodexResult:
 class CodexRunner:
     def __init__(self, binary: str = "codex", popen: Optional[Callable[..., Any]] = None, available: Optional[bool] = None):
         self.binary = binary
+        resolved = find_executable(binary)
+        # A production runner only executes a path that was resolved at startup.
+        # `available=True` remains a narrow test seam for fake subprocess tests.
+        self.executable = resolved or (binary if available is True else None)
         self._popen = popen or subprocess.Popen
-        self._available = find_executable(binary) is not None if available is None else available
+        self._available = self.executable is not None if available is None else available
 
     def start_task(self, prompt: str, cwd: Path, events_path: Path, *, final_file: Optional[Path] = None) -> CodexResult:
         command = [
-            self.binary,
+            self.executable or self.binary,
             "exec",
             "--json",
             "--sandbox",
@@ -50,7 +54,7 @@ class CodexRunner:
 
     def resume_task(self, thread_id: str, prompt: str, cwd: Path, events_path: Path, *, final_file: Optional[Path] = None) -> CodexResult:
         command = [
-            self.binary,
+            self.executable or self.binary,
             "exec",
             "resume",
             thread_id,

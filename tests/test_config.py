@@ -46,6 +46,31 @@ def test_unregistered_project_is_rejected(tmp_path):
         config.project("missing")
 
 
+def test_config_supports_multiple_capabilities_and_migrates_legacy_kind(tmp_path):
+    config_path = tmp_path / "config.local.yaml"
+    config_path.write_text(
+        f"""control_repo: owner/bridge
+trusted_github_logins: [trusted-user]
+projects:
+  research:
+    capabilities: [code, experiment-review]
+    root: {(tmp_path / 'research').as_posix()}
+    repo: owner/research
+  legacy:
+    kind: presentation
+    root: {(tmp_path / 'legacy').as_posix()}
+    repo: owner/legacy
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.project("research").capabilities == ["code", "experiment-review"]
+    assert config.project("legacy").capabilities == ["presentation"]
+    assert config.is_trusted_github_login("TRUSTED-USER")
+
+
 def test_config_rejects_arbitrary_shell_setting(tmp_path):
     config_path = tmp_path / "config.local.yaml"
     config_path.write_text(

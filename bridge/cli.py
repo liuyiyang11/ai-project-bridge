@@ -75,6 +75,12 @@ def doctor(config_path: Union[str, Path]) -> int:
     checks: list[tuple[str, bool, str]] = []
     checks.append(("Python", sys.version_info >= (3, 9), sys.version.split()[0]))
     checks.append(("Git", bool(shutil.which("git")), shutil.which("git") or "not found"))
+    config = None
+    try:
+        config = load_config(config_path)
+        checks.append(("Configuration", True, str(Path(config_path).resolve())))
+    except ConfigError as exc:
+        checks.append(("Configuration", False, str(exc)))
     gh_binary = find_executable("gh")
     checks.append(("GitHub CLI", gh_binary is not None, gh_binary or "not found"))
     if gh_binary:
@@ -85,14 +91,8 @@ def doctor(config_path: Union[str, Path]) -> int:
             checks.append(("gh auth", False, str(exc)))
     else:
         checks.append(("gh auth", False, "GitHub CLI is not installed or not on PATH"))
-    codex_binary = find_executable("codex")
-    checks.append(("Codex CLI", codex_binary is not None, codex_binary or "not found"))
-    config = None
-    try:
-        config = load_config(config_path)
-        checks.append(("Configuration", True, str(Path(config_path).resolve())))
-    except ConfigError as exc:
-        checks.append(("Configuration", False, str(exc)))
+    codex_runner = CodexRunner(config.codex_binary if config else "codex")
+    checks.append(("Codex CLI", codex_runner.executable is not None, codex_runner.executable or "not found"))
     if config:
         if config.python_executable:
             checks.append(("Configured Python", config.python_executable.is_file(), str(config.python_executable)))

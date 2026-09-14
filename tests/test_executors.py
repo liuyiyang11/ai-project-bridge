@@ -5,7 +5,7 @@ from bridge.executors import ExecutionContext
 from bridge.executors.code import CodeExecutor
 from bridge.executors.experiment_review import ExperimentReviewExecutor
 from bridge.executors.presentation import PresentationExecutor
-from bridge.github import Issue
+from bridge.github import GhClient, Issue
 from bridge.task_parser import parse_task_body
 from bridge.task_store import TaskStore
 from bridge.worktree import WorktreeManager
@@ -41,6 +41,11 @@ class FakeGitHub:
         return "https://github.com/owner/demo/pull/9"
 
 
+class NoPrControlGitHub:
+    def create_draft_pr(self, *args, **kwargs):
+        raise AssertionError("control repo client must not create a project PR")
+
+
 class FakeRenderer:
     def render(self, pptx_path, output_dir):
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -62,7 +67,7 @@ def make_repo(tmp_path):
     return repo
 
 
-def make_config(tmp_path, repo, kind="code", command="quick_test"):
+def make_config(tmp_path, repo, kind="code", command="quick_test", project_repo="owner/demo"):
     config_path = tmp_path / "config.local.yaml"
     config_path.write_text(
         f"""control_repo: owner/bridge
@@ -70,7 +75,7 @@ projects:
   demo:
     kind: {kind}
     root: {repo.as_posix()}
-    repo: owner/demo
+    repo: {project_repo}
     allowed_commands:
       {command}:
         argv: [python, -c, 'print(\"ok\")']
@@ -98,7 +103,7 @@ goal: Change it.
     store.initialize(10, "task", {"status": "running", "project": "demo", "task_type": "code"})
     runner = FakeRunner()
     executor = CodeExecutor(runner=runner, manager_factory=lambda project, root: NoPushManager(project.root, root))
-    context = ExecutionContext(config, issue, task, config.project("demo"), store, store.task_dir(10), FakeGitHub(), runner)
+    context = ExecutionContext(config, issue, task, config.project("demo"), store, store.task_dir(10), FakeGitHub(), FakeGitHub(), runner)
 
     result = executor.execute(context)
 
@@ -127,7 +132,7 @@ command_id: evaluate
 ```
 """)
     store.initialize(11, "task", {"status": "running", "project": "demo", "task_type": "experiment-review"})
-    context = ExecutionContext(config, issue, task, config.project("demo"), store, store.task_dir(11), FakeGitHub(), None)
+    context = ExecutionContext(config, issue, task, config.project("demo"), store, store.task_dir(11), FakeGitHub(), FakeGitHub(), None)
 
     result = ExperimentReviewExecutor(publish=False).execute(context)
 
@@ -153,7 +158,7 @@ command_id: evaluate
 ```
 """)
     store.initialize(13, "task", {"status": "running", "project": "demo", "task_type": "experiment-review"})
-    context = ExecutionContext(config, issue, task, config.project("demo"), store, store.task_dir(13), FakeGitHub(), None)
+    context = ExecutionContext(config, issue, task, config.project("demo"), store, store.task_dir(13), FakeGitHub(), FakeGitHub(), None)
 
     result = ExperimentReviewExecutor(
         manager_factory=lambda project, root: NoPushManager(project.root, root),
@@ -182,9 +187,78 @@ brief: brief.md
     store.initialize(12, "task", {"status": "running", "project": "demo", "task_type": "presentation"})
     runner = FakeRunner("deck.pptx")
     executor = PresentationExecutor(runner=runner, manager_factory=lambda project, root: NoPushManager(project.root, root), renderer=FakeRenderer())
-    context = ExecutionContext(config, issue, task, config.project("demo"), store, store.task_dir(12), FakeGitHub(), runner)
+    context = ExecutionContext(config, issue, task, config.project("demo"), store, store.task_dir(12), FakeGitHub(), FakeGitHub(), runner)
 
     result = executor.execute(context)
 
     assert result["presentation"]["final_pptx"] == "final.pptx"
     assert (store.task_dir(12) / "review_bundle" / "presentation" / "final.pptx").is_file()
+
+
+def test_code_executor_creates_pr_in_project_repo_and_references_control_task(tmp_path):
+    repo = make_repo(tmp_path)
+    config = make_config(tmp_path, repo, project_repo="owner/project-repo")
+    store = TaskStore(config.state_root)
+    issue = Issue(14, "Code", "", "https://github.com/owner/bridge/issues/14", {"ai-task", "task:code", "status:running"})
+    task = parse_task_body("""<!-- AI_BRIDGE_TASK -->
+```yaml
+version: 1
+task_type: code
+project: demo
+title: Change demo
+```
+""")
+    store.initialize(14, "task", {"status": "running", "project": "demo", "task_type": "code"})
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return type("Result", (), {"returncode": 0, "stdout": "https://github.com/owner/project-repo/pull/14\n", "stderr": ""})()
+
+    runner = FakeRunner()
+    project_github = GhClient("gh", "owner/project-repo", run=fake_run)
+    executor = CodeExecutor(runner=runner, manager_factory=lambda project, root: NoPushManager(project.root, root))
+    context = ExecutionContext(config, issue, task, config.project("demo"), store, store.task_dir(14), NoPrControlGitHub(), project_github, runner)
+
+    result = executor.execute(context)
+
+    assert result["pr_url"].endswith("/pull/14")
+    assert config.project("demo").repo == project_github.repo
+    assert "owner/project-repo" in calls[0][0]
+    assert "Control task: owner/bridge#14" in calls[0][1]["input"]
+    assert "Closes #14" not in calls[0][1]["input"]
+
+
+def test_experiment_review_creates_pr_in_project_repo_and_references_control_task(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "outputs").mkdir()
+    (repo / "outputs" / "metrics.json").write_text('{"accuracy": 0.8}', encoding="utf-8")
+    config = make_config(tmp_path, repo, kind="experiment-review", command="evaluate", project_repo="owner/project-repo")
+    store = TaskStore(config.state_root)
+    issue = Issue(15, "Review", "", "https://github.com/owner/bridge/issues/15", {"ai-task", "task:experiment-review", "status:running"})
+    task = parse_task_body("""<!-- AI_BRIDGE_TASK -->
+```yaml
+version: 1
+task_type: experiment-review
+project: demo
+title: Review
+command_id: evaluate
+```
+""")
+    store.initialize(15, "task", {"status": "running", "project": "demo", "task_type": "experiment-review"})
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return type("Result", (), {"returncode": 0, "stdout": "https://github.com/owner/project-repo/pull/15\n", "stderr": ""})()
+
+    project_github = GhClient("gh", "owner/project-repo", run=fake_run)
+    context = ExecutionContext(config, issue, task, config.project("demo"), store, store.task_dir(15), NoPrControlGitHub(), project_github, None)
+
+    result = ExperimentReviewExecutor(manager_factory=lambda project, root: NoPushManager(project.root, root)).execute(context)
+
+    assert result["pr_url"].endswith("/pull/15")
+    assert config.project("demo").repo == project_github.repo
+    assert "owner/project-repo" in calls[0][0]
+    assert "Control task: owner/bridge#15" in calls[0][1]["input"]
+    assert "Closes #15" not in calls[0][1]["input"]

@@ -62,8 +62,10 @@ class Dispatcher:
             if task.task_type != task_type:
                 raise TaskParseError(f"task type {task.task_type!r} does not match Issue label task:{task_type}")
             project = self.config.project(task.project)
-            if project.kind != task.task_type:
-                raise ConfigError(f"project {task.project!r} is registered as {project.kind}, not {task.task_type}")
+            if task.task_type not in project.capabilities:
+                raise ConfigError(f"project {task.project!r} does not support task type {task.task_type!r}")
+            if self.config.trusted_github_logins and not self.config.is_trusted_github_login(issue.author_login):
+                return None
         except Exception:
             raise
         if not self.store.exists(issue.number):
@@ -84,12 +86,16 @@ class Dispatcher:
         for comment in reversed(full_issue.comments):
             if "AI_BRIDGE_REWORK" not in comment.body:
                 continue
+            if not self.config.is_trusted_github_login(comment.author_login):
+                continue
             if not self.store.claim_rework_comment(issue.number, comment.id):
                 continue
             try:
                 instruction = parse_rework_comment(comment.body)
                 task = parse_task_body(self.store.task_path(issue.number, "task.yaml").read_text(encoding="utf-8"))
                 project = self.config.project(task.project)
+                if task.task_type not in project.capabilities:
+                    raise ConfigError(f"project {task.project!r} does not support task type {task.task_type!r}")
                 if task.task_type not in {"code", "presentation"}:
                     raise RuntimeError("only code and presentation tasks support Codex rework in V0.1")
                 self.github.set_status(issue.number, "running")
@@ -101,7 +107,17 @@ class Dispatcher:
 
     def _execute(self, issue: Issue, task: Any, project: Any, rework_instruction: Optional[str]) -> dict:
         executor = self.executors[task.task_type]
-        context = ExecutionContext(self.config, issue, task, project, self.store, self.store.task_dir(issue.number), self.github, self.runner)
+        context = ExecutionContext(
+            self.config,
+            issue,
+            task,
+            project,
+            self.store,
+            self.store.task_dir(issue.number),
+            self.github,
+            self.github.for_repo(project.repo),
+            self.runner,
+        )
         try:
             result = executor.execute(context, rework_instruction=rework_instruction)
             result = dict(result or {})

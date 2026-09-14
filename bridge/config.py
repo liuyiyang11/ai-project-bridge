@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sys
 from typing import Literal, Optional, Union
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, validator
+from pydantic import BaseModel, Field, ValidationError, root_validator, validator
 
 from .security import SecurityError, ensure_safe_relative_path
 
 
 class ConfigError(ValueError):
     """Raised for missing, malformed, or unsafe local configuration."""
+
+
+ProjectCapability = Literal["code", "presentation", "experiment-review"]
 
 
 class AllowedCommand(BaseModel):
@@ -32,7 +36,8 @@ class ProjectConfig(BaseModel):
     class Config:
         extra = "forbid"
 
-    kind: Literal["code", "presentation", "experiment-review"]
+    kind: Optional[ProjectCapability] = None
+    capabilities: Optional[list[ProjectCapability]] = None
     root: Path
     repo: str
     allowed_commands: dict[str, AllowedCommand] = Field(default_factory=dict)
@@ -51,6 +56,26 @@ class ProjectConfig(BaseModel):
         except SecurityError as exc:
             raise ValueError(str(exc)) from exc
 
+    @validator("capabilities")
+    def validate_capabilities(cls, value: Optional[list[ProjectCapability]]) -> Optional[list[ProjectCapability]]:
+        if value is not None and len(set(value)) != len(value):
+            raise ValueError("capabilities must not contain duplicates")
+        return value
+
+    @root_validator(skip_on_failure=True)
+    def migrate_kind_to_capabilities(cls, values: dict) -> dict:
+        kind = values.get("kind")
+        capabilities = values.get("capabilities")
+        if capabilities is None:
+            if kind is None:
+                raise ValueError("project requires capabilities; legacy kind is also accepted during migration")
+            values["capabilities"] = [kind]
+        elif not capabilities:
+            raise ValueError("capabilities must contain at least one task type")
+        elif kind is not None and kind not in capabilities:
+            raise ValueError("legacy kind must also be present in capabilities when both are configured")
+        return values
+
 
 class BundleLimits(BaseModel):
     class Config:
@@ -66,6 +91,7 @@ class BridgeConfig(BaseModel):
         extra = "forbid"
 
     control_repo: str
+    trusted_github_logins: set[str] = Field(default_factory=set)
     poll_seconds: int = Field(default=30, ge=1, le=86400)
     projects: dict[str, ProjectConfig] = Field(default_factory=dict)
     limits: BundleLimits = Field(default_factory=BundleLimits)
@@ -81,6 +107,15 @@ class BridgeConfig(BaseModel):
             raise ValueError("control_repo must be in OWNER/REPOSITORY form")
         return value
 
+    @validator("trusted_github_logins")
+    def validate_trusted_github_logins(cls, value: set[str]) -> set[str]:
+        normalized: set[str] = set()
+        for login in value:
+            if not isinstance(login, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,39}", login):
+                raise ValueError("trusted_github_logins entries must be GitHub login names")
+            normalized.add(login.casefold())
+        return normalized
+
     @validator("state_dir")
     def validate_state_dir(cls, value: str) -> str:
         try:
@@ -93,6 +128,9 @@ class BridgeConfig(BaseModel):
             return self.projects[name]
         except KeyError as exc:
             raise ConfigError(f"project is not registered: {name}") from exc
+
+    def is_trusted_github_login(self, login: Optional[str]) -> bool:
+        return bool(login) and login.casefold() in self.trusted_github_logins
 
     @property
     def state_root(self) -> Path:

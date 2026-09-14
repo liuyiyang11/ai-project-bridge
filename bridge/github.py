@@ -37,6 +37,7 @@ class IssueComment:
     id: str
     body: str
     created_at: str = ""
+    author_login: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ class Issue:
     url: str
     labels: set[str] = field(default_factory=set)
     comments: list[IssueComment] = field(default_factory=list)
+    author_login: Optional[str] = None
 
 
 _STATUS_LABELS = {"status:ready", "status:running", "status:review", "status:failed", "status:approved"}
@@ -72,6 +74,10 @@ class GhClient:
     def auth_status(self) -> subprocess.CompletedProcess[str]:
         return self._run(["auth", "status"])
 
+    def for_repo(self, repo: str) -> "GhClient":
+        """Create a client for a locally configured project repository."""
+        return GhClient(self.binary, repo, run=self._run_fn)
+
     def list_candidate_issues(self) -> list[Issue]:
         result = self._run(
             [
@@ -86,7 +92,7 @@ class GhClient:
                 "--limit",
                 "100",
                 "--json",
-                "number,title,body,url,labels",
+                "number,title,body,url,labels,author",
             ]
         )
         return [self._issue_from_json(item) for item in json.loads(result.stdout or "[]")]
@@ -100,7 +106,7 @@ class GhClient:
                 "--repo",
                 self.repo,
                 "--json",
-                "number,title,body,url,labels,comments",
+                "number,title,body,url,labels,comments,author",
             ]
         )
         return self._issue_from_json(json.loads(result.stdout))
@@ -153,7 +159,12 @@ class GhClient:
     @staticmethod
     def _issue_from_json(item: dict) -> Issue:
         comments = [
-            IssueComment(str(comment.get("id") or comment.get("databaseId") or ""), comment.get("body", ""), comment.get("createdAt", ""))
+            IssueComment(
+                str(comment.get("id") or comment.get("databaseId") or ""),
+                comment.get("body", ""),
+                comment.get("createdAt", ""),
+                GhClient._author_login(comment),
+            )
             for comment in item.get("comments", [])
         ]
         return Issue(
@@ -163,4 +174,13 @@ class GhClient:
             url=item.get("url", ""),
             labels={label.get("name", "") for label in item.get("labels", [])},
             comments=comments,
+            author_login=GhClient._author_login(item),
         )
+
+    @staticmethod
+    def _author_login(item: dict) -> Optional[str]:
+        author = item.get("author")
+        if isinstance(author, dict):
+            login = author.get("login")
+            return login if isinstance(login, str) and login else None
+        return None

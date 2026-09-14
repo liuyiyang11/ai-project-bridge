@@ -83,7 +83,7 @@ class CodeExecutor:
             manager.push(info.path, info.branch)
             if not pr_url:
                 body = self._pr_body(context, result, git_state["changed_files"], tests)
-                pr_url = context.github.create_draft_pr(info.branch, info.base_branch, context.task.title, body)
+                pr_url = context.project_github.create_draft_pr(info.branch, info.base_branch, context.task.title, body)
         return {
             "thread_id": thread_id,
             "final_message": _value(result, "final_message", ""),
@@ -101,7 +101,7 @@ class CodeExecutor:
         test_lines = [f"- `{item['command_id']}`: exit {item['returncode']}" for item in tests] or ["- No configured quick_test command"]
         return "\n".join(
             [
-                f"Closes #{context.issue.number}",
+                f"Control task: {context.config.control_repo}#{context.issue.number}",
                 "",
                 "## Codex summary",
                 _value(result, "final_message", "(no final summary)"),

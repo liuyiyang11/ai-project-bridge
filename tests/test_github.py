@@ -53,3 +53,26 @@ def test_gh_client_creates_draft_pr_with_explicit_branch():
     assert "ai/issue-4" in calls[0][0]
     assert calls[0][1]["input"] == "Body"
 
+
+def test_gh_client_reads_issue_and_comment_author_logins():
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        payload = {
+            "number": 4,
+            "title": "Task",
+            "body": "body",
+            "url": "https://github/4",
+            "labels": [],
+            "author": {"login": "trusted-user"},
+            "comments": [{"id": "comment-1", "body": "review", "author": {"login": "reviewer"}}],
+        }
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    issue = GhClient("gh", "owner/bridge", run=fake_run).view_issue(4)
+
+    assert issue.author_login == "trusted-user"
+    assert issue.comments[0].author_login == "reviewer"
+    assert "author" in calls[0][-1]
+

@@ -59,6 +59,21 @@ command: powershell Remove-Item *
         )
 
 
+def test_remote_task_cannot_override_registered_project_repo():
+    with pytest.raises(TaskParseError, match="extra"):
+        parse_task_body(
+            """<!-- AI_BRIDGE_TASK -->
+```yaml
+version: 1
+task_type: code
+project: demo
+repo: untrusted-owner/untrusted-repo
+title: Bad
+```
+"""
+        )
+
+
 @pytest.mark.parametrize("bad_path", ["../brief.md", "C:/secret/brief.md", "/etc/passwd"])
 def test_presentation_paths_must_be_project_relative(bad_path):
     with pytest.raises(TaskParseError, match="relative"):

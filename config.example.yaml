@@ -1,4 +1,6 @@
 control_repo: "OWNER/ai-project-bridge"
+trusted_github_logins:
+  - "YOUR_GITHUB_LOGIN"
 poll_seconds: 30
 
 limits:
@@ -8,7 +10,7 @@ limits:
 
 projects:
   code-project:
-    kind: code
+    capabilities: [code, experiment-review]
     root: "D:/Projects/code-project"
     repo: "OWNER/code-project"
     allowed_commands:
@@ -19,14 +21,14 @@ projects:
     artifact_dirs: ["outputs", "results", "runs"]
 
   thesis-ppt:
-    kind: presentation
+    capabilities: [presentation]
     root: "D:/Presentations/ThesisDefense"
     repo: "OWNER/ThesisDefense"
     allowed_commands: {}
     artifact_dirs: []
 
   experiment-project:
-    kind: experiment-review
+    capabilities: [experiment-review]
     root: "D:/Projects/experiment-project"
     repo: "OWNER/experiment-project"
     allowed_commands:

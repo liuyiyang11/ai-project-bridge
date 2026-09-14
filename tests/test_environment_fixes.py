@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import subprocess
 
 import pytest
@@ -8,10 +9,16 @@ from bridge.github import find_executable
 
 
 def test_find_executable_falls_back_to_codex_install_directory(tmp_path, monkeypatch):
-    install = tmp_path / "OpenAI" / "Codex" / "bin" / "version-1"
-    install.mkdir(parents=True)
-    executable = install / "codex.exe"
-    executable.write_bytes(b"fake")
+    old_install = tmp_path / "OpenAI" / "Codex" / "bin" / "version-1"
+    new_install = tmp_path / "OpenAI" / "Codex" / "bin" / "version-2"
+    old_install.mkdir(parents=True)
+    new_install.mkdir(parents=True)
+    old_executable = old_install / "codex.exe"
+    executable = new_install / "codex.exe"
+    old_executable.write_bytes(b"old")
+    executable.write_bytes(b"new")
+    os.utime(old_executable, (1, 1))
+    os.utime(executable, (2, 2))
     monkeypatch.setattr("bridge.github.shutil.which", lambda name: None)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
 

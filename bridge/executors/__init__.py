@@ -18,6 +18,7 @@ class ExecutionContext:
     project: ProjectConfig
     store: TaskStore
     task_dir: Path
-    github: Any
+    control_github: Any
+    project_github: Any
     runner: Any
 

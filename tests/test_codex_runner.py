@@ -34,7 +34,7 @@ def test_codex_runner_uses_workspace_write_json_and_stdin(tmp_path):
     result = runner.start_task("make the change", tmp_path, tmp_path / "events.jsonl", final_file=final_file)
 
     argv = calls[0][0]
-    assert argv[:2] == ["codex", "exec"]
+    assert argv[:2] == [runner.executable, "exec"]
     assert "--json" in argv
     assert "--sandbox" in argv and argv[argv.index("--sandbox") + 1] == "workspace-write"
     assert "--dangerously-bypass-approvals-and-sandbox" not in argv
@@ -54,7 +54,7 @@ def test_codex_runner_resume_uses_saved_thread_id(tmp_path):
     runner = CodexRunner("codex", popen=fake_popen, available=True)
     runner.resume_task("thread-123", "rework", tmp_path, tmp_path / "events.jsonl")
 
-    assert calls[0][:4] == ["codex", "exec", "resume", "thread-123"]
+    assert calls[0][:4] == [runner.executable, "exec", "resume", "thread-123"]
     assert "--json" in calls[0]
     assert "--dangerously-bypass-approvals-and-sandbox" not in calls[0]
 
@@ -63,4 +63,40 @@ def test_missing_codex_is_clear(tmp_path):
     runner = CodexRunner("not-a-real-codex", available=False)
     with pytest.raises(CodexUnavailableError, match="Codex CLI"):
         runner.start_task("task", tmp_path, tmp_path / "events.jsonl")
+
+
+def test_codex_runner_executes_resolved_desktop_executable_when_not_on_path(tmp_path, monkeypatch):
+    calls = []
+    desktop_executable = tmp_path / "OpenAI" / "Codex" / "bin" / "version-2" / "codex.exe"
+    desktop_executable.parent.mkdir(parents=True)
+    desktop_executable.write_bytes(b"fake")
+
+    def fake_popen(argv, **kwargs):
+        calls.append(argv)
+        return FakeProcess(argv, **kwargs)
+
+    monkeypatch.setattr("bridge.github.shutil.which", lambda name: None)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    runner = CodexRunner("codex", popen=fake_popen)
+
+    runner.start_task("make the change", tmp_path, tmp_path / "events.jsonl")
+
+    assert runner.executable == str(desktop_executable.resolve())
+    assert calls[0][0] == str(desktop_executable.resolve())
+
+
+def test_codex_runner_uses_absolute_configured_binary(tmp_path):
+    calls = []
+    configured_executable = tmp_path / "configured-codex.exe"
+    configured_executable.write_bytes(b"fake")
+
+    def fake_popen(argv, **kwargs):
+        calls.append(argv)
+        return FakeProcess(argv, **kwargs)
+
+    runner = CodexRunner(str(configured_executable), popen=fake_popen)
+    runner.start_task("make the change", tmp_path, tmp_path / "events.jsonl")
+
+    assert runner.executable == str(configured_executable.resolve())
+    assert calls[0][0] == str(configured_executable.resolve())
 
