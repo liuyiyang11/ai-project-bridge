@@ -36,8 +36,8 @@ def test_config_yaml_windows_double_quote_error_has_actionable_hint(tmp_path):
         load_config(config_path)
 
 
-def test_py39_can_start_bridge_cli():
-    python = Path(r"E:\anaconda\envs\py39\python.exe")
+def test_configured_python_can_start_bridge_cli():
+    python = Path(r"C:\Users\29833\.conda\envs\py10\python.exe")
     if not python.is_file():
         pytest.skip(f"configured Python is not installed: {python}")
     result = subprocess.run([str(python), "-m", "bridge", "--help"], capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -46,7 +46,7 @@ def test_py39_can_start_bridge_cli():
     assert "run-once" in result.stdout
 
 
-def test_windows_scripts_pin_py39():
+def test_windows_scripts_pin_configured_python():
     for name in ("install.ps1", "doctor.ps1", "run.ps1"):
         content = (Path("scripts") / name).read_text(encoding="utf-8")
-        assert r"E:\anaconda\envs\py39\python.exe" in content
+        assert r"C:\Users\29833\.conda\envs\py10\python.exe" in content

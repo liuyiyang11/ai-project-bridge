@@ -1,12 +1,19 @@
 # MCP stdio tools
 
-Start the local adapter with:
+Start the local adapter with the standalone module entry point:
+
+```powershell
+& $Python -m bridge.mcp.server --config config.local.yaml
+```
+
+The legacy equivalent remains available:
 
 ```powershell
 & $Python -m bridge --config config.local.yaml mcp-stdio
 ```
 
-The adapter is intended for MCP-compatible local clients.  A normal ChatGPT Plus chat cannot be assumed to connect to a local MCP stdio process, so GitHub transport remains the current cloud-facing entry point.
+The adapter is intended for MCP-compatible local clients. See
+[mcp-client-setup.md](mcp-client-setup.md) for ChatGPT Desktop setup.
 
 The server exposes exactly these tools. V0.2.1 makes only code-task startup asynchronous: `bridge_start_code_task` persists a `QUEUED` task and returns immediately while the shared worker runtime advances it in the background.
 

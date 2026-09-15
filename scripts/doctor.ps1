@@ -1,4 +1,4 @@
 $ErrorActionPreference = "Stop"
-$Python = 'E:\anaconda\envs\py39\python.exe'
+$Python = 'C:\Users\29833\.conda\envs\py10\python.exe'
 & $Python -m bridge doctor
 

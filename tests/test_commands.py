@@ -47,7 +47,7 @@ def test_registered_python_command_uses_configured_interpreter(tmp_path, monkeyp
         repo="owner/demo",
         allowed_commands={"quick_test": {"argv": ["python", "-m", "pytest", "-q"]}},
     )
-    configured_python = Path(r"E:\anaconda\envs\py39\python.exe")
+    configured_python = Path(r"C:\Users\29833\.conda\envs\py10\python.exe")
 
     run_registered_command(project, "quick_test", tmp_path, configured_python)
 

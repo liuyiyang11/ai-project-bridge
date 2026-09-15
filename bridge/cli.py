@@ -71,7 +71,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         from .mcp.server import McpStdioServer
         from .mcp.tools import BridgeMcpTools
 
-        McpStdioServer(BridgeMcpTools(config=config)).serve()
+        server = McpStdioServer(BridgeMcpTools(config=config))
+        try:
+            server.serve()
+        finally:
+            server.close()
         return 0
     if args.command in {"run", "run-once"}:
         return run_bridge(config, once=args.command == "run-once")

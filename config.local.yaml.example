@@ -7,7 +7,7 @@ poll_seconds: 30
 codex:
   backend: app-server
   routing_policy: inherit
-python_executable: 'E:\anaconda\envs\py39\python.exe'
+python_executable: 'C:\Users\29833\.conda\envs\py10\python.exe'
 
 limits:
   max_artifact_file_mb: 25

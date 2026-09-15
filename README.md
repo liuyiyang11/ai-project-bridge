@@ -46,7 +46,7 @@ WorkerQueue 只管理 Future 的提交、取消和关闭，不定义 `QUEUED`/`R
 在仓库根目录执行：
 
 ```powershell
-$Python = 'E:\anaconda\envs\py39\python.exe'
+$Python = 'C:\Users\29833\.conda\envs\py10\python.exe'
 & $Python -m pip install -e '.[test]'
 # Optional PPT rendering and PDF contact sheets:
 & $Python -m pip install -e '.[presentation]'
@@ -103,7 +103,7 @@ projects:
 
 `root` 是本机项目绝对路径，`repo` 是项目 GitHub repo。Issue 只能写 `project: unetmamba`，不能写 `root`、`cwd`、`repo`、命令或绝对路径。`allowed_commands` 的每个命令必须是预先注册的 argv 数组；Bridge 使用 `shell=False`。
 
-`python_executable` 用于指定 Bridge 执行本地 Python 命令的解释器。本机配置已设为 `E:\anaconda\envs\py39\python.exe`；即使 `allowed_commands.argv` 写的是 `python`，Bridge 也会替换为该解释器。
+`python_executable` 用于指定 Bridge 执行本地 Python 命令的解释器。本机配置已设为 `C:\Users\29833\.conda\envs\py10\python.exe`；即使 `allowed_commands.argv` 写的是 `python`，Bridge 也会替换为该解释器。
 
 YAML 中的 Windows 反斜杠路径必须使用单引号，例如 `root: 'E:\AI project bridge'`；也可以使用正斜杠，例如 `root: "E:/AI project bridge"`。不要把未转义的反斜杠放在 YAML 双引号中。
 
@@ -114,7 +114,7 @@ YAML 中的 Windows 反斜杠路径必须使用单引号，例如 `root: 'E:\AI 
 ## 4. 检查并初始化 GitHub labels
 
 ```powershell
-$Python = 'E:\anaconda\envs\py39\python.exe'
+$Python = 'C:\Users\29833\.conda\envs\py10\python.exe'
 & $Python -m bridge --config config.local.yaml doctor
 & $Python -m bridge --config config.local.yaml setup-github
 ```
@@ -128,14 +128,14 @@ $Python = 'E:\anaconda\envs\py39\python.exe'
 只扫描一次：
 
 ```powershell
-$Python = 'E:\anaconda\envs\py39\python.exe'
+$Python = 'C:\Users\29833\.conda\envs\py10\python.exe'
 & $Python -m bridge --config config.local.yaml run-once
 ```
 
 持续轮询：
 
 ```powershell
-$Python = 'E:\anaconda\envs\py39\python.exe'
+$Python = 'C:\Users\29833\.conda\envs\py10\python.exe'
 & $Python -m bridge --config config.local.yaml run
 ```
 
@@ -227,14 +227,14 @@ Bridge 只接受 `trusted_github_logins` 中 GitHub 用户提交的任务 Issue 
 查看任务：
 
 ```powershell
-$Python = 'E:\anaconda\envs\py39\python.exe'
+$Python = 'C:\Users\29833\.conda\envs\py10\python.exe'
 & $Python -m bridge --config config.local.yaml show-task 123
 ```
 
 修复本地配置、项目 Git 状态或依赖后重试：
 
 ```powershell
-$Python = 'E:\anaconda\envs\py39\python.exe'
+$Python = 'C:\Users\29833\.conda\envs\py10\python.exe'
 & $Python -m bridge --config config.local.yaml retry 123
 & $Python -m bridge --config config.local.yaml run-once
 ```
@@ -244,7 +244,7 @@ $Python = 'E:\anaconda\envs\py39\python.exe'
 ## 12. 测试与验证
 
 ```powershell
-$Python = 'E:\anaconda\envs\py39\python.exe'
+$Python = 'C:\Users\29833\.conda\envs\py10\python.exe'
 & $Python -m bridge doctor
 & $Python -m pytest
 ```
@@ -254,11 +254,12 @@ $Python = 'E:\anaconda\envs\py39\python.exe'
 ## 13. 本地 MCP stdio
 
 ```powershell
-$Python = 'E:\anaconda\envs\py39\python.exe'
-& $Python -m bridge --config config.local.yaml mcp-stdio
+$Python = 'C:\Users\29833\.conda\envs\py10\python.exe'
+& $Python -m bridge.mcp.server --config config.local.yaml
 ```
 
-本地 MCP 只服务兼容 MCP 的客户端。普通 ChatGPT Plus 对话不能被假设为可以直接连接 local MCP，因此当前云端使用方式仍是 GitHub transport。工具列表和输入边界见 [docs/mcp-tools.md](docs/mcp-tools.md)。
+本地 MCP 通过标准 STDIO 服务兼容 MCP 的客户端；ChatGPT Desktop 配置见
+[docs/mcp-client-setup.md](docs/mcp-client-setup.md)，工具列表和输入边界见 [docs/mcp-tools.md](docs/mcp-tools.md)。
 
 对 code task，MCP 入口固定为 `bridge_start_code_task → TaskSupervisor.start_code_task()`；它不会依据 `task_type` 走通用 `start_task()` 分支，也不会直接创建 Codex session。
 

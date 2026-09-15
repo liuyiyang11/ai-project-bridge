@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import json
 import sys
-from typing import Any, Optional, TextIO
+from pathlib import Path
+from typing import Any, Optional, TextIO, Union
 
+from ..config import ConfigError, load_config
 from .tools import BridgeMcpTools, McpToolError
 
 
@@ -81,6 +84,13 @@ class McpStdioServer:
                 output_stream.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")
                 output_stream.flush()
 
+    def close(self) -> None:
+        """Close the runtime owned by the server, if it exposes a close hook."""
+        supervisor = getattr(self.tools, "supervisor", None)
+        close = getattr(supervisor, "close", None)
+        if callable(close):
+            close()
+
     @staticmethod
     def _result(message_id: Any, result: dict[str, Any]) -> dict[str, Any]:
         return {"jsonrpc": "2.0", "id": message_id, "result": result}
@@ -91,3 +101,54 @@ class McpStdioServer:
 
 
 MCPStdioServer = McpStdioServer
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the standalone ``python -m bridge.mcp.server`` parser."""
+    parser = argparse.ArgumentParser(
+        prog="python -m bridge.mcp.server",
+        description="Serve the AI Project Bridge MCP tools over stdio.",
+    )
+    parser.add_argument(
+        "--config",
+        default="config.local.yaml",
+        type=Path,
+        help="path to the local Bridge configuration (default: config.local.yaml)",
+    )
+    return parser
+
+
+def create_configured_server(config_path: Union[str, Path] = "config.local.yaml") -> McpStdioServer:
+    """Load local configuration and construct the MCP server.
+
+    This function is deliberately kept separate from ``main`` so tests and
+    embedding code can verify server construction without touching process
+    stdio.  The configuration is local startup policy; MCP callers only see
+    registered project IDs and never receive project roots.
+    """
+    config = load_config(config_path)
+    return McpStdioServer(BridgeMcpTools(config=config))
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """Run the MCP stdio server as a normal Python module entry point."""
+    args = build_parser().parse_args(argv)
+    try:
+        server = create_configured_server(args.config)
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        server.serve()
+    except (BrokenPipeError, KeyboardInterrupt):
+        # A client closing stdio is a normal shutdown path for a local MCP
+        # process.  Do not write protocol noise to stdout during shutdown.
+        return 0
+    finally:
+        server.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
