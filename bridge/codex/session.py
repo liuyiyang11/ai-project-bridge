@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 import threading
 import time
 import uuid
@@ -14,6 +16,9 @@ from .app_server import CodexAppServerClient
 from .model_catalog import CodexModelCatalog, CodexModelError
 from .protocol import CodexProcessError, CodexProtocolError
 from .runner import CodexResumeMismatchError
+
+
+logger = logging.getLogger(__name__)
 
 
 class SessionState(str, Enum):
@@ -176,6 +181,7 @@ class CodexSessionManager:
                     pass
             self._clients[task_id] = client
             client.start()
+            logger.info("Codex task app-server started task_id=%s", task_id)
             record.process = getattr(client, "process", None) or client
             catalog_response = client.model_list()
             self.catalog = CodexModelCatalog.from_response(catalog_response)
@@ -194,6 +200,7 @@ class CodexSessionManager:
                 record.thread_id = returned_thread
                 record.current_action = "starting turn"
                 self._persist(record)
+            logger.info("Codex task thread/start completed task_id=%s thread_id=%s", task_id, returned_thread)
             # Set RUNNING before turn/start: a fake or very fast server may
             # emit turn/completed while the request response is still pending.
             self._set_state(record, SessionState.RUNNING, "running turn")
@@ -204,6 +211,7 @@ class CodexSessionManager:
                 reasoning_effort=reasoning_effort,
             )
             turn_id = self._turn_id(turn_response)
+            logger.info("Codex task turn/start completed task_id=%s turn_id=%s", task_id, turn_id or "unknown")
             if turn_id:
                 with self._lock:
                     record.active_turn_id = turn_id
@@ -441,6 +449,7 @@ class CodexSessionManager:
                     handle.write(json.dumps(event, ensure_ascii=False) + "\n")
             method = event.get("method")
             params = event.get("params") if isinstance(event.get("params"), dict) else {}
+            logger.info("Codex task notification receive task_id=%s method=%s", task_id, method or "unknown")
             # INTERRUPTED/CANCELLED is a terminal boundary for every late
             # app-server notification.  In particular, a completion from the
             # old turn must not mutate memory, durable state, or review_ready.
@@ -473,7 +482,15 @@ class CodexSessionManager:
                 record.completion.set()
             elif method == "error":
                 message = params.get("error") if isinstance(params.get("error"), dict) else params
-                self._fail(record, RuntimeError(self._turn_error(message) or str(message)))
+                if self._is_retryable_error(params):
+                    record.current_action = self._retry_action(params)
+                    logger.warning(
+                        "Codex task response stream reconnecting task_id=%s action=%s",
+                        task_id,
+                        record.current_action,
+                    )
+                else:
+                    self._fail(record, RuntimeError(self._turn_error(message) or str(message)))
             elif method == "warning":
                 record.current_action = str(params.get("message") or "warning")[:1000]
             elif method == "thread/status/changed":
@@ -488,8 +505,38 @@ class CodexSessionManager:
 
     def _on_process_error(self, task_id: str, error: Exception) -> None:
         record = self.sessions.get(task_id)
+        logger.error(
+            "Codex task process error task_id=%s error_type=%s returncode=%s",
+            task_id,
+            type(error).__name__,
+            getattr(error, "returncode", None),
+        )
         if record and record.state in {SessionState.PREPARING, SessionState.RUNNING}:
             self._fail(record, error)
+
+    @staticmethod
+    def _is_retryable_error(params: dict[str, Any]) -> bool:
+        """Recognize app-server retry notifications without hiding final errors."""
+        if params.get("willRetry") is True:
+            return True
+        if "willRetry" in params:
+            return False
+        error = params.get("error") if isinstance(params.get("error"), dict) else params
+        message = error.get("message") if isinstance(error, dict) else None
+        if isinstance(message, str):
+            match = re.search(r"reconnecting\s*\.\.\.\s*(\d+)\s*/\s*(\d+)", message, re.IGNORECASE)
+            if match:
+                return int(match.group(1)) < int(match.group(2))
+        info = error.get("codexErrorInfo") if isinstance(error, dict) else None
+        return isinstance(info, dict) and "responseStreamDisconnected" in info and isinstance(message, str) and "reconnect" in message.casefold()
+
+    @staticmethod
+    def _retry_action(params: dict[str, Any]) -> str:
+        error = params.get("error") if isinstance(params.get("error"), dict) else params
+        message = error.get("message") if isinstance(error, dict) else None
+        if isinstance(message, str) and message.strip():
+            return message.strip()[:200]
+        return "reconnecting"
 
     def _emit_event(self, record: SessionRecord, method: str, params: dict[str, Any]) -> None:
         mapped = {
@@ -596,6 +643,7 @@ class CodexSessionManager:
 
     def _fail(self, record: SessionRecord, error: Exception) -> None:
         record.last_error = f"{type(error).__name__}: {error}"
+        logger.error("Codex task failed task_id=%s error_type=%s", record.task_id, type(error).__name__)
         if record.state != SessionState.FAILED:
             self._set_state(record, SessionState.FAILED, "failed")
         else:

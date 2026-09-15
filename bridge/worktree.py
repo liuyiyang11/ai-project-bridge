@@ -3,9 +3,10 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 
 class WorktreeError(RuntimeError):
@@ -15,7 +16,7 @@ class WorktreeError(RuntimeError):
 @dataclass(frozen=True)
 class WorktreeInfo:
     project: str
-    issue_number: int
+    issue_number: Union[int, str]
     branch: str
     path: Path
     base_branch: str
@@ -73,6 +74,10 @@ class WorktreeManager:
     def _is_generated_issue_branch(branch: str) -> bool:
         return re.fullmatch(r"ai/issue-[0-9]+", branch) is not None
 
+    @staticmethod
+    def _is_generated_task_branch(branch: str) -> bool:
+        return re.fullmatch(r"ai/task-[a-z0-9-]+", branch) is not None
+
     def base_ref(self, branch: Optional[str] = None) -> str:
         branch = branch or self.default_branch()
         local_ref = f"refs/heads/{branch}"
@@ -109,20 +114,52 @@ class WorktreeManager:
         return f"ai/issue-{int(issue_number)}"
 
     @staticmethod
+    def _task_token(task_id: str) -> str:
+        if not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", task_id):
+            raise WorktreeError("task id must be a safe identifier")
+        # Keep the identifier recognizable while making the Git ref and the
+        # Windows worktree directory safe.  The digest also distinguishes
+        # case-only IDs, which otherwise alias on Windows filesystems.
+        readable = re.sub(r"[^A-Za-z0-9-]+", "-", task_id).strip("-").lower() or "task"
+        digest = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:12]
+        return f"{readable[:72]}-{digest}"
+
+    @classmethod
+    def branch_for_task(cls, task_id: str) -> str:
+        return f"ai/task-{cls._task_token(task_id)}"
+
+    @staticmethod
     def assert_publishable_branch(branch: str) -> None:
         if branch in {"main", "master"}:
             raise WorktreeError(f"protected branch cannot be pushed: {branch}")
-        if not re.fullmatch(r"ai/issue-[0-9]+", branch):
-            raise WorktreeError(f"Bridge only publishes generated issue branches: {branch}")
+        if not (WorktreeManager._is_generated_issue_branch(branch) or WorktreeManager._is_generated_task_branch(branch)):
+            raise WorktreeError(f"Bridge only publishes generated task branches: {branch}")
 
     def prepare(self, project: str, issue_number: int) -> WorktreeInfo:
+        """Prepare the legacy issue-number worktree used by GitHub tasks."""
+        return self._prepare(
+            project,
+            int(issue_number),
+            self.branch_for_issue(issue_number),
+            self.worktree_root / f"{project}-issue-{int(issue_number)}",
+        )
+
+    def prepare_for_task(self, project: str, task_id: str) -> WorktreeInfo:
+        """Prepare an isolated worktree whose identity is the Bridge task ID."""
+        token = self._task_token(task_id)
+        return self._prepare(
+            project,
+            task_id,
+            self.branch_for_task(task_id),
+            self.worktree_root / f"{project}-task-{token}",
+        )
+
+    def _prepare(self, project: str, identity: Union[int, str], branch: str, path: Path) -> WorktreeInfo:
         self.ensure_repository()
-        branch = self.branch_for_issue(issue_number)
         self.assert_publishable_branch(branch)
         base_branch = self.default_branch()
         base_ref = self.base_ref(base_branch)
         base_head = self._git(["rev-parse", base_ref]).stdout.strip()
-        path = self.worktree_root / f"{project}-issue-{int(issue_number)}"
         self.worktree_root.mkdir(parents=True, exist_ok=True)
 
         if path.exists():
@@ -138,7 +175,7 @@ class WorktreeManager:
                 self._git(["worktree", "add", str(path), branch])
             else:
                 self._git(["worktree", "add", "-b", branch, str(path), base_ref])
-        return WorktreeInfo(project, int(issue_number), branch, path, base_branch, base_head)
+        return WorktreeInfo(project, identity, branch, path, base_branch, base_head)
 
     def cleanup(self, info: WorktreeInfo) -> None:
         if info.path.exists():

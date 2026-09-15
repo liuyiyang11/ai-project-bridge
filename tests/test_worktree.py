@@ -2,6 +2,7 @@ import subprocess
 
 import pytest
 
+from bridge.task_store import TaskStore
 from bridge.worktree import WorktreeError, WorktreeManager
 
 
@@ -32,6 +33,35 @@ def test_worktree_create_branch_and_cleanup(tmp_path):
     assert "changed.txt" in manager.changed_files(info.path)
     manager.cleanup(info)
     assert not info.path.exists()
+
+
+def test_runtime_task_worktrees_use_unique_task_identity(tmp_path):
+    repo = make_repo(tmp_path)
+    manager = WorktreeManager(repo, tmp_path / "worktrees")
+    store = TaskStore(tmp_path / ".bridge")
+
+    first = manager.prepare_for_task("demo", "task-A")
+    second = manager.prepare_for_task("demo", "task-B")
+    try:
+        store.create_task("task-A", project="demo", instruction="first")
+        store.create_task("task-B", project="demo", instruction="second")
+
+        assert first.path != second.path
+        assert first.branch != second.branch
+        assert first.path.is_dir() and second.path.is_dir()
+        assert first.branch.startswith("ai/task-")
+        assert second.branch.startswith("ai/task-")
+        assert store.task_dir("task-A") != store.task_dir("task-B")
+        assert store.task_dir("task-A").name == "task-A"
+        assert store.task_dir("task-B").name == "task-B"
+        first_artifacts = store.task_dir("task-A") / "review_bundle"
+        second_artifacts = store.task_dir("task-B") / "review_bundle"
+        first_artifacts.mkdir()
+        second_artifacts.mkdir()
+        assert first_artifacts != second_artifacts
+    finally:
+        manager.cleanup(second)
+        manager.cleanup(first)
 
 
 @pytest.mark.parametrize("branch", ["main", "master"])

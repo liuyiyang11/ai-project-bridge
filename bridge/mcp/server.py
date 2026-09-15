@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any, Optional, TextIO, Union
@@ -132,6 +133,14 @@ def create_configured_server(config_path: Union[str, Path] = "config.local.yaml"
 
 def main(argv: Optional[list[str]] = None) -> int:
     """Run the MCP stdio server as a normal Python module entry point."""
+    # MCP protocol responses belong exclusively on stdout.  Runtime
+    # diagnostics, including app-server lifecycle logs, are deliberately sent
+    # to stderr so a Desktop MCP client never receives non-protocol bytes.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
     args = build_parser().parse_args(argv)
     try:
         server = create_configured_server(args.config)

@@ -121,6 +121,29 @@ def test_app_server_client_uses_shellless_stdio_json_rpc(tmp_path):
     client.close()
 
 
+def test_app_server_lifecycle_diagnostics_are_logged_without_payloads(tmp_path, caplog):
+    process = _Process()
+
+    def popen(argv, **kwargs):
+        return process
+
+    caplog.set_level("INFO", logger="bridge.codex.app_server")
+    client = CodexAppServerClient("codex", cwd=tmp_path, popen=popen, available=True, request_timeout=1)
+    client.start()
+    client.thread_start(model="gpt-5.6-luna")
+    client.turn_start("thread-1", "do not expose this instruction", reasoning_effort="max")
+    client.close()
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "process start" in messages
+    assert "initialize response received" in messages
+    assert "thread/start response received" in messages
+    assert "turn/start request" in messages
+    assert "notification receive" not in messages or "method=" in messages
+    assert "do not expose this instruction" not in messages
+    assert "max" not in messages
+
+
 def test_session_manager_drains_a_deferred_real_app_server_notification(tmp_path):
     process = _Process()
 
@@ -152,6 +175,62 @@ def test_session_manager_drains_a_deferred_real_app_server_notification(tmp_path
 
     assert result.exit_code == 0
     assert manager.status("task-deferred")["state"] == SessionState.WAITING_REVIEW.value
+    manager.close()
+
+
+def test_retryable_response_stream_disconnect_waits_for_final_turn_result(tmp_path):
+    store = TaskStore(tmp_path / ".bridge")
+    store.create_task("task-retry", project="demo", task_type="code", instruction="wait")
+    fake = FakeAppServer(auto_complete=False)
+    manager = CodexSessionManager(_config(tmp_path), store=store, client_factory=lambda **kwargs: _attach(fake, kwargs))
+
+    record = manager.start_task("task-retry", "demo", tmp_path, "wait")
+    fake.emit(
+        "error",
+        {
+            "error": {
+                "message": "Reconnecting... 2/5",
+                "codexErrorInfo": {"responseStreamDisconnected": {}},
+            },
+            "willRetry": True,
+            "turnId": record.turn_id,
+        },
+    )
+
+    assert record.state == SessionState.RUNNING
+    assert store.get_task("task-retry")["state"] == SessionState.RUNNING.value
+    assert not record.completion.is_set()
+
+    fake.emit(
+        "turn/completed",
+        {"turn": {"id": record.turn_id, "status": "completed", "items": []}},
+    )
+    result = manager.wait_for_completion("task-retry", timeout=1)
+
+    assert result.exit_code == 0
+    assert store.get_task("task-retry")["state"] == SessionState.WAITING_REVIEW.value
+    manager.close()
+
+
+def test_final_response_stream_disconnect_still_fails(tmp_path):
+    store = TaskStore(tmp_path / ".bridge")
+    store.create_task("task-final-disconnect", project="demo", task_type="code", instruction="wait")
+    fake = FakeAppServer(auto_complete=False)
+    manager = CodexSessionManager(_config(tmp_path), store=store, client_factory=lambda **kwargs: _attach(fake, kwargs))
+
+    manager.start_task("task-final-disconnect", "demo", tmp_path, "wait")
+    fake.emit(
+        "error",
+        {
+            "error": {
+                "message": "Reconnecting... 5/5",
+                "codexErrorInfo": {"responseStreamDisconnected": {}},
+            },
+            "willRetry": False,
+        },
+    )
+
+    assert manager.status("task-final-disconnect")["state"] == SessionState.FAILED.value
     manager.close()
 
 

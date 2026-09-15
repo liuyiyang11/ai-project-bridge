@@ -540,10 +540,12 @@ class TaskSupervisor:
             except TypeError:
                 return self.worktree_factory(project)
         manager = WorktreeManager(project.root, self.config.state_root / "worktrees", project.remote, project.base_branch)
-        execution_number = self.store.next_execution_number()
-        info = manager.prepare(project_name, execution_number)
-        self.store.update_state(task_id, execution_number=execution_number)
-        return info
+        # Runtime tasks are identified by their Bridge task ID.  The old
+        # execution-number allocator was based on numeric GitHub issue IDs and
+        # returned 1 for UUID task IDs, causing unrelated tasks to share one
+        # worktree and branch.  Keep issue-number preparation for the legacy
+        # dispatcher, but never use it as the runtime task identity.
+        return manager.prepare_for_task(project_name, task_id)
 
     def _source_worktree(self, project: str, source_task_id: Optional[str]) -> Path:
         if not source_task_id:

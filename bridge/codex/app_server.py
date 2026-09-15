@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import subprocess
 import threading
@@ -20,6 +21,9 @@ from .protocol import (
     request_payload,
     safe_notification,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class CodexAppServerClient:
@@ -96,6 +100,11 @@ class CodexAppServerClient:
                 errors="replace",
                 shell=False,
             )
+            logger.info(
+                "Codex app-server process start executable=%s cwd=%s",
+                self.executable or self.binary,
+                self.cwd,
+            )
         except FileNotFoundError as exc:
             raise CodexProcessError("Codex CLI is not available; install it or update codex_binary") from exc
         self._started = True
@@ -113,6 +122,7 @@ class CodexAppServerClient:
             },
             timeout=timeout,
         )
+        logger.info("Codex app-server initialize response received fields=%s", sorted(result))
         self.notify("initialized")
         return result
 
@@ -142,7 +152,9 @@ class CodexAppServerClient:
         }
         if model:
             params["model"] = model
-        return self.request("thread/start", params)
+        result = self.request("thread/start", params)
+        logger.info("Codex app-server thread/start response received fields=%s", sorted(result))
+        return result
 
     def thread_resume(
         self,
@@ -189,7 +201,15 @@ class CodexAppServerClient:
         # API keeps the clearer `reasoning_effort` name.
         if reasoning_effort:
             params["effort"] = reasoning_effort
-        return self.request("turn/start", params)
+        logger.info(
+            "Codex app-server turn/start request thread_id=%s instruction_chars=%d model=%s",
+            thread_id,
+            len(instruction),
+            model or "default",
+        )
+        result = self.request("turn/start", params)
+        logger.info("Codex app-server turn/start response received fields=%s", sorted(result))
+        return result
 
     def start_turn(self, thread_id: str, instruction: str, **kwargs: Any) -> dict[str, Any]:
         return self.turn_start(thread_id, instruction, **kwargs)
@@ -312,6 +332,7 @@ class CodexAppServerClient:
                     process.kill()
             except OSError:
                 pass
+        logger.info("Codex app-server process exit code=%s", self._returncode())
 
     def __enter__(self) -> "CodexAppServerClient":
         self.start()
@@ -345,11 +366,17 @@ class CodexAppServerClient:
                 if isinstance(line, bytes):
                     line = line.decode("utf-8", errors="replace")
                 try:
-                    self._inbound.put(parse_message(line))
+                    message = parse_message(line)
+                    if message.is_response:
+                        logger.info("Codex app-server response received id=%s", message.message_id)
+                    elif message.method:
+                        logger.info("Codex app-server notification receive method=%s", message.method)
+                    self._inbound.put(message)
                 except CodexProtocolError as exc:
                     self._inbound.put(JsonRpcMessage({"method": "error", "params": {"message": str(exc)}}))
         finally:
             self._inbound.put(None)
+            logger.warning("Codex app-server stdout EOF returncode=%s", self._returncode())
             if not self._closed and self.process_error_handler:
                 try:
                     self.process_error_handler(CodexProcessError("Codex app-server stdout closed", returncode=self._returncode(), stderr=self.stderr))
@@ -363,7 +390,9 @@ class CodexAppServerClient:
         try:
             value = stream.read()
             if value:
-                self.stderr += value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+                text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+                self.stderr += text
+                logger.info("Codex app-server stderr received chars=%d", len(text))
         except (OSError, ValueError):
             return
 
