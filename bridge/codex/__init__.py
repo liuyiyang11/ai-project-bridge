@@ -1,5 +1,5 @@
 from .app_server import CodexAppServerClient
-from .fake_app_server import FakeAppServer
+from .fake_app_server import FakeAppServer, FakeCodexAppServer
 from .model_catalog import CodexModelCatalog, CodexModelError, ModelRecord
 from .runner import CodexResult, CodexResumeMismatchError, CodexRunner, CodexUnavailableError
 from .exec_runner import ExecCodexRunner
@@ -16,6 +16,7 @@ __all__ = [
     "CodexUnavailableError",
     "ExecCodexRunner",
     "FakeAppServer",
+    "FakeCodexAppServer",
     "ModelRecord",
     "SessionRecord",
     "SessionResult",

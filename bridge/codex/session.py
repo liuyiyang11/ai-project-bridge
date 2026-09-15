@@ -301,10 +301,32 @@ class CodexSessionManager:
         project = state.get("project")
         if not all(isinstance(value, str) and value for value in (thread_id, worktree, project)):
             raise SessionTransitionError("saved task state does not contain project, worktree_path, and thread_id")
+        if state.get("task_type", "code") != "code":
+            raise SessionTransitionError("only code tasks can resume a saved Codex thread")
+        project_lookup = getattr(self.config, "project", None)
+        if not callable(project_lookup):
+            raise SessionTransitionError("saved task project cannot be validated")
+        try:
+            project_config = project_lookup(project)
+        except Exception as exc:
+            raise SessionTransitionError("saved task project is not registered") from exc
+        if "code" not in getattr(project_config, "capabilities", []):
+            raise SessionTransitionError("saved task project does not support code tasks")
+        state_root = getattr(self.config, "state_root", None)
+        if state_root is None:
+            raise SessionTransitionError("saved task worktree cannot be validated")
+        worktree_path = Path(worktree).expanduser().resolve()
+        worktree_root = (Path(state_root).resolve() / "worktrees").resolve()
+        try:
+            relative = worktree_path.relative_to(worktree_root)
+        except ValueError as exc:
+            raise SessionTransitionError("saved task worktree is outside the Bridge worktree root") from exc
+        if relative == Path(".") or not worktree_path.is_dir():
+            raise SessionTransitionError("saved task worktree is not a valid Bridge worktree")
         return self.start_task(
             task_id,
             project,
-            Path(worktree),
+            worktree_path,
             instruction,
             model=state.get("model"),
             reasoning_effort=state.get("reasoning_effort"),
@@ -429,6 +451,7 @@ class CodexSessionManager:
 
     def _emit_event(self, record: SessionRecord, method: str, params: dict[str, Any]) -> None:
         mapped = {
+            "thread/started": "thread_started",
             "turn/started": "turn_started",
             "turn/completed": "turn_completed",
             "item/agentMessage/delta": "agent_message",
@@ -439,7 +462,7 @@ class CodexSessionManager:
             "error": "error",
             "thread/status/changed": "state_changed",
         }.get(method, method.replace("/", "_"))
-        if method in {"thread/started", "turn/plan/updated"}:
+        if method in {"turn/plan/updated"}:
             mapped = "state_changed"
         elif method in {"item/started", "item/completed"}:
             item = params.get("item") if isinstance(params.get("item"), dict) else params
@@ -490,7 +513,12 @@ class CodexSessionManager:
         if old != state:
             bus = self._bus(record)
             if bus is not None:
-                emitted = bus.transition(old.value, state.value, action)
+                emitted = bus.transition(
+                    old.value,
+                    state.value,
+                    action,
+                    updates={"review_ready": state == SessionState.WAITING_REVIEW},
+                )
                 if isinstance(emitted, dict):
                     record.event_seq = int(emitted.get("seq", record.event_seq))
         self._persist(record)
@@ -581,7 +609,12 @@ class CodexSessionManager:
             item_type = value.get("type")
             if isinstance(item_type, str) and "reasoning" in item_type.casefold():
                 return {"type": "reasoning_redacted"}
-            return {str(key): CodexSessionManager._safe_event_data(item) for key, item in value.items() if key not in {"reasoning", "rawReasoning", "chainOfThought", "textDelta"}}
+            blocked = {"reasoning", "rawreasoning", "chainofthought", "textdelta", "raw_chain_of_thought", "raw_reasoning"}
+            return {
+                str(key): CodexSessionManager._safe_event_data(item)
+                for key, item in value.items()
+                if str(key).casefold() not in blocked
+            }
         if isinstance(value, list):
             return [CodexSessionManager._safe_event_data(item) for item in value[:100]]
         if isinstance(value, str):

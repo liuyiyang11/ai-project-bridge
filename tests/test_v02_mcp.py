@@ -57,7 +57,10 @@ def test_mcp_exposes_nine_tools_and_safe_task_lifecycle(tmp_path):
 
     started = tools.call("bridge_start_code_task", {"project": "demo", "instruction": "change code", "acceptance": ["tests pass"]})
     task_id = started["task_id"]
-    assert started["state"] == "WAITING_REVIEW"
+    assert started["state"] == "QUEUED"
+    future = supervisor.worker_queue.future(task_id)
+    assert future is not None
+    future.result(timeout=2)
     status = tools.call("bridge_task_status", {"task_id": task_id})
     assert set(status) >= {"state", "stage", "thread_id", "turn_id", "changed_files", "review_ready", "last_event_seq"}
     events = tools.call("bridge_task_events", {"task_id": task_id, "after_seq": 0, "limit": 3})

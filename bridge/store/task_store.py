@@ -58,6 +58,17 @@ class TaskStore:
         key = self._task_key(task_id)
         if self.exists(key):
             raise ValueError(f"task already exists: {key}")
+        reserved = {
+            "state",
+            "status",
+            "stage",
+            "current_action",
+            "event_seq",
+            "last_event_seq",
+            "review_ready",
+        }
+        if reserved.intersection(metadata):
+            raise ValueError("lifecycle fields are initialized by create_task")
         now = utc_now()
         state: dict[str, Any] = {
             "task_id": key,
@@ -140,6 +151,13 @@ class TaskStore:
     def update_task(self, task_id: Union[int, str], **updates: Any) -> dict[str, Any]:
         key = self._task_key(task_id)
         state = self.get_task(key)
+        current = str(state.get("state", state.get("status", "")))
+        requested_state = getattr(updates.get("state"), "value", updates.get("state"))
+        requested_status = getattr(updates.get("status"), "value", updates.get("status"))
+        if "state" in updates and str(requested_state) != current:
+            raise ValueError("state changes require transition_task")
+        if "status" in updates and str(requested_status) in TASK_TRANSITIONS and str(requested_status) != current:
+            raise ValueError("lifecycle status changes require transition_task")
         state.update(updates)
         if "worktree_path" in updates and "worktree" not in updates:
             state["worktree"] = updates["worktree_path"]
@@ -155,6 +173,8 @@ class TaskStore:
     def transition_task(self, task_id: Union[int, str], from_state: str, to_state: str, reason: str) -> dict[str, Any]:
         key = self._task_key(task_id)
         state = self.get_task(key)
+        from_state = getattr(from_state, "value", from_state)
+        to_state = getattr(to_state, "value", to_state)
         current = str(state.get("state", state.get("status", "")))
         if current != str(from_state):
             raise ValueError(f"task state changed: expected {from_state}, found {current}")
@@ -276,6 +296,21 @@ class TaskStore:
     def read_events(self, task_id: Union[int, str], *, after_seq: int = 0, limit: int = 100) -> list[dict[str, Any]]:
         return self.list_events(task_id, after_seq=after_seq, limit=limit)
 
+    def all_events(self, task_id: Union[int, str]) -> list[dict[str, Any]]:
+        """Read the complete event journal for startup recovery."""
+        path = self.task_path(task_id, "events.jsonl")
+        if not path.is_file():
+            return []
+        result: list[dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                result.append(event)
+        return result
+
     def append_stdout(self, task_id: Union[int, str], text: str) -> None:
         with self.task_path(task_id, "stdout.log").open("a", encoding="utf-8") as handle:
             handle.write(text)
@@ -386,4 +421,3 @@ class TaskStore:
         finally:
             if os.path.exists(temp_name):
                 os.unlink(temp_name)
-

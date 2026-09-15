@@ -99,3 +99,6 @@ class FakeAppServer:
         error = RuntimeError(message)
         if self.process_error_handler:
             self.process_error_handler(error)
+
+
+FakeCodexAppServer = FakeAppServer

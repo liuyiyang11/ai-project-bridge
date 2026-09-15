@@ -80,6 +80,17 @@ RAW_REASONING_METHODS = frozenset(
     }
 )
 
+_RAW_REASONING_KEYS = frozenset(
+    {
+        "reasoning",
+        "rawreasoning",
+        "chainofthought",
+        "textdelta",
+        "raw_chain_of_thought",
+        "raw_reasoning",
+    }
+)
+
 
 def parse_message(line: str) -> JsonRpcMessage:
     import json
@@ -132,7 +143,7 @@ def _bounded_copy(value: Any, depth: int = 0) -> Any:
             return {"type": "reasoning_redacted"}
         result: dict[str, Any] = {}
         for key, item in value.items():
-            if key in {"textDelta", "reasoning", "rawReasoning", "chainOfThought"}:
+            if str(key).casefold() in _RAW_REASONING_KEYS:
                 continue
             result[str(key)] = _bounded_copy(item, depth + 1)
         return result

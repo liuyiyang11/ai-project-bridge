@@ -8,12 +8,15 @@ from typing import Any, Callable, Optional
 from ..codex.session import CodexSessionManager, SessionState, SessionTransitionError
 from ..collectors.artifact_collector import collect_artifacts
 from ..commands import run_registered_command
+from ..executors.code import RuntimeCodeExecutor
 from ..security import SecurityError, ensure_safe_relative_path, resolve_under
 from ..task_store import TaskStore, utc_now
 from ..worktree import WorktreeManager
 from .event_bus import TaskEventBus
 from .router import TaskRequest, TaskRouter
 from .state_machine import InvalidTaskTransition, TaskStateMachine
+from .task_runner import CodeTaskHandler, TaskRunner
+from .worker import WorkerQueue
 
 
 class TaskSupervisor:
@@ -26,14 +29,32 @@ class TaskSupervisor:
         store: Optional[TaskStore] = None,
         session_manager: Optional[CodexSessionManager] = None,
         worktree_factory: Optional[Callable[..., Any]] = None,
+        worker_queue: Optional[WorkerQueue] = None,
+        task_runner: Optional[TaskRunner] = None,
+        code_executor: Optional[Any] = None,
     ):
         self.config = config
         self.store = store or TaskStore(config.state_root)
         self.session_manager = session_manager or CodexSessionManager(config, store=self.store)
         self.worktree_factory = worktree_factory
+        self.worker_queue = worker_queue or WorkerQueue()
+        self._code_executor = code_executor or RuntimeCodeExecutor(
+            config,
+            self.store,
+            self.session_manager,
+            self._prepare_worktree_for_task,
+        )
+        self.task_runner = task_runner or TaskRunner(
+            store=self.store,
+            handlers={"code": CodeTaskHandler(self._code_executor)},
+        )
+        self.reconcile_task_events()
+        self.recover_tasks()
 
     def start_task(self, request: TaskRequest, *, worktree: Optional[Path] = None) -> dict[str, Any]:
         TaskRouter.route(request)
+        if request.task_type == "code":
+            return self._enqueue_code_task(request, worktree=worktree)
         project = self._project_for(request.project, request.task_type)
         if request.task_type == "experiment-review":
             return self.start_experiment_review(
@@ -88,18 +109,16 @@ class TaskSupervisor:
         task_id: Optional[str] = None,
         worktree: Optional[Path] = None,
     ) -> dict[str, Any]:
-        return self.start_task(
-            TaskRequest(
-                task_type="code",
-                project=project,
-                instruction=instruction,
-                acceptance=acceptance or [],
-                model=model,
-                reasoning_effort=reasoning_effort,
-                task_id=task_id,
-            ),
-            worktree=worktree,
+        request = TaskRequest(
+            task_type="code",
+            project=project,
+            instruction=instruction,
+            acceptance=acceptance or [],
+            model=model,
+            reasoning_effort=reasoning_effort,
+            task_id=task_id,
         )
+        return self._enqueue_code_task(request, worktree=worktree)
 
     def start_presentation_task(
         self,
@@ -218,23 +237,22 @@ class TaskSupervisor:
         return self.status(task_id)
 
     def status(self, task_id: str) -> dict[str, Any]:
-        try:
-            return self.session_manager.status(task_id)
-        except SessionTransitionError:
-            state = self._stored_state(task_id)
-            return {
-                "task_id": task_id,
-                "state": state.get("state", state.get("status", "UNKNOWN")),
-                "stage": state.get("stage", state.get("current_action", "")),
-                "thread_id": state.get("thread_id"),
-                "turn_id": state.get("turn_id"),
-                "current_action": state.get("current_action", state.get("stage", "")),
-                "changed_files": state.get("changed_files", []),
-                "review_ready": bool(state.get("review_ready", False)),
-                "last_event_seq": int(state.get("last_event_seq", state.get("event_seq", 0))),
-                "model": state.get("model"),
-                "reasoning_effort": state.get("reasoning_effort"),
-            }
+        state = self._stored_state(task_id)
+        return {
+            "task_id": task_id,
+            "project": state.get("project"),
+            "state": state.get("state", state.get("status", "UNKNOWN")),
+            "stage": state.get("stage", state.get("current_action", "")),
+            "thread_id": state.get("thread_id"),
+            "turn_id": state.get("turn_id"),
+            "current_action": state.get("current_action", state.get("stage", "")),
+            "changed_files": list(state.get("changed_files", [])),
+            "review_ready": bool(state.get("review_ready", False)),
+            "last_event_seq": int(state.get("last_event_seq", state.get("event_seq", 0))),
+            "model": state.get("model"),
+            "reasoning_effort": state.get("reasoning_effort"),
+            "last_error": state.get("last_error"),
+        }
 
     def task_events(self, task_id: str, *, after_seq: int = 0, limit: int = 100) -> list[dict[str, Any]]:
         self._stored_state(task_id)
@@ -255,9 +273,11 @@ class TaskSupervisor:
         for item in artifacts:
             if not isinstance(item, dict):
                 continue
-            if kind and item.get("kind") != kind:
+            if kind and kind != "all" and item.get("kind") != kind:
                 continue
-            safe = {key: item[key] for key in ("path", "kind", "bytes", "source") if key in item and isinstance(item[key], (str, int, float, bool))}
+            safe = {key: item[key] for key in ("path", "kind", "size", "hash") if key in item and isinstance(item[key], (str, int, float, bool))}
+            if "size" not in safe and isinstance(item.get("bytes"), (str, int, float, bool)):
+                safe["size"] = item["bytes"]
             if "path" in safe and isinstance(safe["path"], str) and (Path(safe["path"]).is_absolute() or ".." in safe["path"].replace("\\", "/").split("/")):
                 continue
             output.append(safe)
@@ -275,30 +295,75 @@ class TaskSupervisor:
 
     def close(self) -> None:
         self.session_manager.close()
+        self.worker_queue.shutdown(wait=False, cancel_futures=True)
+
+    def _enqueue_code_task(self, request: TaskRequest, *, worktree: Optional[Path] = None) -> dict[str, Any]:
+        TaskRouter.route(request)
+        project = self._project_for(request.project, "code")
+        if not isinstance(request.instruction, str) or not request.instruction.strip():
+            raise ValueError("instruction must be non-empty")
+        task_id = request.task_id or self._new_task_id()
+        self._create_task(task_id, request, project)
+        if worktree is not None:
+            self.store.update_task(task_id, supplied_worktree=str(Path(worktree).resolve()))
+        try:
+            self.worker_queue.submit(task_id, self.task_runner.run, task_id)
+        except Exception as exc:
+            self._fail_task(task_id, exc)
+            raise
+        return {"task_id": task_id, "state": SessionState.QUEUED.value, "project": request.project}
+
+    def recover_tasks(self) -> None:
+        """Requeue durable queued work and make unverifiable active work explicit."""
+        for task_id in self.store.list_task_ids():
+            try:
+                state = self.store.get_task(task_id)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            task_state = state.get("state", state.get("status"))
+            if task_state == SessionState.QUEUED.value and state.get("task_type", "code") == "code":
+                try:
+                    self.worker_queue.submit(task_id, self.task_runner.run, task_id)
+                except ValueError:
+                    continue
+            elif task_state in {SessionState.PREPARING.value, SessionState.RUNNING.value}:
+                self._bus(task_id).transition(
+                    str(task_state),
+                    SessionState.UNKNOWN.value,
+                    "Bridge restarted before active Codex session could be verified",
+                )
+
+    def reconcile_task_events(self) -> None:
+        for task_id in self.store.list_task_ids():
+            try:
+                self._bus(task_id).reconcile()
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+
+    def _prepare_worktree_for_task(self, project_name: str, task_id: str) -> Any:
+        state = self._stored_state(task_id)
+        project = self._project_for(project_name, "code")
+        supplied = state.get("supplied_worktree")
+        return self._prepare_worktree(project, project_name, task_id, Path(supplied) if isinstance(supplied, str) else None)
 
     def _create_task(self, task_id: str, request: TaskRequest, project: Any) -> dict[str, Any]:
         if self.store.exists(task_id):
             raise ValueError(f"task already exists: {task_id}")
         if not isinstance(request.acceptance, list):
             request.acceptance = []
-        task_yaml = json.dumps({"version": 1, "task_type": request.task_type, "project": request.project, "title": request.instruction[:200], "acceptance": request.acceptance}, ensure_ascii=False)
-        initial = {
-            "status": SessionState.QUEUED.value,
-            "state": SessionState.QUEUED.value,
-            "stage": "queued",
-            "current_action": "queued",
-            "project": request.project,
-            "task_type": request.task_type,
-            "model": request.model,
-            "reasoning_effort": request.reasoning_effort,
-            "review_ready": False,
-            "event_seq": 0,
-            "last_event_seq": 0,
-            "changed_files": [],
-        }
-        self.store.initialize(task_id, task_yaml, initial)
-        self._bus(task_id).emit("state_changed", {"from": None, "to": SessionState.QUEUED.value, "action": "queued"})
-        return self.store.load_state(task_id)
+        self.store.create_task(
+            task_id,
+            project=request.project,
+            task_type=request.task_type,
+            instruction=request.instruction,
+            acceptance=request.acceptance,
+            model=request.model,
+            reasoning_effort=request.reasoning_effort,
+        )
+        bus = self._bus(task_id)
+        bus.emit("task_created", {"project": request.project, "task_type": request.task_type})
+        bus.emit("state_changed", {"from": None, "to": SessionState.QUEUED.value, "reason": "queued"})
+        return self.store.get_task(task_id)
 
     def _prepare_worktree(self, project: Any, project_name: str, task_id: str, supplied: Optional[Path]) -> Any:
         if supplied is not None:
@@ -355,25 +420,25 @@ class TaskSupervisor:
         state = self._stored_state(task_id)
         old_value = state.get("state", state.get("status", SessionState.QUEUED.value))
         old_state = SessionState(old_value)
-        if old_state != new_state:
-            TaskStateMachine.require(old_state, new_state)
-        self.store.update_state(
-            task_id,
-            state=new_state.value,
-            status=new_state.value,
-            stage=action,
-            current_action=action,
-            review_ready=new_state == SessionState.WAITING_REVIEW,
+        if old_state == new_state:
+            return
+        self._bus(task_id).transition(
+            old_state.value,
+            new_state.value,
+            action,
+            updates={"review_ready": new_state == SessionState.WAITING_REVIEW},
         )
-        self._bus(task_id).emit("state_changed", {"from": old_state.value, "to": new_state.value, "action": action})
 
     def _fail_task(self, task_id: str, error: Exception) -> None:
         if not self.store.exists(task_id):
             return
         state = self._stored_state(task_id)
         current = state.get("state", state.get("status", SessionState.QUEUED.value))
-        self.store.update_state(task_id, state=SessionState.FAILED.value, status=SessionState.FAILED.value, stage="failed", current_action="failed", last_error=f"{type(error).__name__}: {error}")
-        self._bus(task_id).emit("error", {"message": f"{type(error).__name__}: {error}", "previous_state": current})
+        message = f"{type(error).__name__}: {error}"[:2000]
+        if current != SessionState.FAILED.value and TaskStateMachine.can_transition(current, SessionState.FAILED.value):
+            self._bus(task_id).transition(str(current), SessionState.FAILED.value, "failed")
+        self.store.update_task(task_id, last_error=message)
+        self._bus(task_id).emit("error", {"message": message, "previous_state": current})
 
     def _stored_state(self, task_id: str) -> dict[str, Any]:
         if not self.store.exists(task_id):

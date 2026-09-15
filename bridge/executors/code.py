@@ -7,6 +7,7 @@ from ..codex.runner import CodexResumeMismatchError
 from ..collectors.git_collector import collect_git_state
 from ..commands import run_registered_command
 from ..config import ProjectConfig
+from ..security import ensure_safe_relative_path, resolve_under
 from ..task_store import utc_now
 from ..worktree import WorktreeManager
 from . import ExecutionContext
@@ -213,6 +214,21 @@ class RuntimeCodeExecutor:
                 turn_id=status.get("turn_id"),
                 changed_files=list(status.get("changed_files", [])),
             )
+            artifacts = []
+            for changed in list(status.get("changed_files", []))[:100]:
+                try:
+                    relative = ensure_safe_relative_path(str(changed))
+                    artifact_path = resolve_under(worktree, relative)
+                except Exception:
+                    continue
+                if artifact_path.is_file():
+                    artifacts.append({"path": relative, "size": artifact_path.stat().st_size, "kind": "file"})
+            manifest = self.store.save_artifacts(task_id, artifacts)
+            from ..orchestration.event_bus import TaskEventBus
+
+            bus = TaskEventBus(self.store, task_id)
+            for artifact in manifest:
+                bus.emit("artifact_created", {"path": artifact.get("path"), "size": artifact.get("size"), "kind": artifact.get("kind")})
             self.store.finish_run(
                 task_id,
                 run["number"],

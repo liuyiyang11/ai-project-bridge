@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from bridge.store.task_store import TaskStore, utc_now
 
 
@@ -47,3 +49,17 @@ def test_events_append_with_sequence_and_reload_from_new_store_instance(tmp_path
     assert reloaded.get_task("task-1")["artifact_manifest"] == "result.json"
     assert reloaded.task_path("task-1", "result.json").is_file()
 
+
+def test_task_store_routes_lifecycle_status_changes_through_transition(tmp_path):
+    store = TaskStore(tmp_path / ".bridge")
+    store.create_task("task-1", project="demo", task_type="code", instruction="wait")
+
+    with pytest.raises(ValueError, match="lifecycle status"):
+        store.update_task("task-1", status="RUNNING")
+
+
+def test_task_store_create_always_starts_queued(tmp_path):
+    store = TaskStore(tmp_path / ".bridge")
+
+    with pytest.raises(ValueError, match="lifecycle fields"):
+        store.create_task("task-1", project="demo", instruction="wait", state="RUNNING")

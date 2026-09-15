@@ -30,11 +30,11 @@ class TaskRunner:
 
     def run(self, task_id: str) -> dict[str, Any]:
         task = self.store.get_task(task_id)
-        handler = self.handlers.get(str(task.get("task_type", "code")))
-        if handler is None:
-            raise ValueError(f"task type is not supported by the runtime: {task.get('task_type')}")
         bus = TaskEventBus(self.store, task_id)
         try:
+            handler = self.handlers.get(str(task.get("task_type", "code")))
+            if handler is None:
+                raise ValueError(f"task type is not supported by the runtime: {task.get('task_type')}")
             current = str(self.store.get_task(task_id).get("state", ""))
             if current == "QUEUED":
                 bus.transition("QUEUED", "PREPARING", "worker accepted task")
@@ -57,8 +57,9 @@ class TaskRunner:
         summary = " ".join(traceback.format_exc(limit=6).splitlines())[-4000:]
         bus = TaskEventBus(self.store, task_id)
         current = str(self.store.get_task(task_id).get("state", ""))
-        if current != "FAILED" and TaskStateMachine.can_transition(current, "FAILED"):
+        already_failed = current == "FAILED"
+        if not already_failed and TaskStateMachine.can_transition(current, "FAILED"):
             bus.transition(current, "FAILED", "task failed")
-        bus.emit("error", {"message": message, "traceback": summary})
+        if not already_failed:
+            bus.emit("error", {"message": message, "traceback": summary})
         self.store.update_task(task_id, last_error=f"{message}; traceback: {summary}")
-

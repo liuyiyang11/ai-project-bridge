@@ -51,3 +51,26 @@ def test_state_machine_exposes_unknown_recovery_state():
     assert SessionState.UNKNOWN.value == "UNKNOWN"
     assert TaskStateMachine.can_transition("RUNNING", "UNKNOWN")
     assert TaskStateMachine.can_transition("UNKNOWN", "RUNNING")
+
+
+def test_event_bus_reconciles_journaled_transition_and_keeps_sequence_monotonic(tmp_path):
+    store = TaskStore(tmp_path / ".bridge")
+    store.create_task("task-1", project="demo", task_type="code", instruction="wait")
+    store.append_event(
+        "task-1",
+        {
+            "seq": 1,
+            "task_id": "task-1",
+            "type": "state_changed",
+            "time": "2026-01-01T00:00:00+00:00",
+            "data": {"from": "QUEUED", "to": "PREPARING", "reason": "journaled"},
+        },
+    )
+    bus = TaskEventBus(store, "task-1")
+
+    bus.reconcile()
+    event = bus.emit("worker_started", {})
+
+    assert store.get_task("task-1")["state"] == "PREPARING"
+    assert event["seq"] == 2
+    assert store.get_task("task-1")["last_event_seq"] == 2
