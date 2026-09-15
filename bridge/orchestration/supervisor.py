@@ -8,6 +8,7 @@ from typing import Any, Callable, Optional
 from ..codex.session import CodexSessionManager, SessionState, SessionTransitionError
 from ..collectors.artifact_collector import collect_artifacts
 from ..commands import run_registered_command
+from ..experiments.executor import ExperimentExecutor
 from ..executors.code import RuntimeCodeExecutor
 from ..security import SecurityError, ensure_safe_relative_path, resolve_under
 from ..task_store import TaskStore, utc_now
@@ -15,7 +16,7 @@ from ..worktree import WorktreeManager
 from .event_bus import TaskEventBus
 from .router import TaskRequest, TaskRouter
 from .state_machine import InvalidTaskTransition, TaskStateMachine
-from .task_runner import CodeTaskHandler, TaskRunner
+from .task_runner import CodeTaskHandler, ExperimentTaskHandler, TaskRunner
 from .worker import WorkerQueue
 
 
@@ -32,6 +33,7 @@ class TaskSupervisor:
         worker_queue: Optional[WorkerQueue] = None,
         task_runner: Optional[TaskRunner] = None,
         code_executor: Optional[Any] = None,
+        experiment_executor: Optional[Any] = None,
     ):
         self.config = config
         self.store = store or TaskStore(config.state_root)
@@ -44,9 +46,13 @@ class TaskSupervisor:
             self.session_manager,
             self._prepare_worktree_for_task,
         )
+        self._experiment_executor = experiment_executor or ExperimentExecutor(config, self.store)
         self.task_runner = task_runner or TaskRunner(
             store=self.store,
-            handlers={"code": CodeTaskHandler(self._code_executor)},
+            handlers={
+                "code": CodeTaskHandler(self._code_executor),
+                "experiment": ExperimentTaskHandler(self._experiment_executor),
+            },
         )
         self.reconcile_task_events()
         self.recover_tasks()
@@ -55,6 +61,8 @@ class TaskSupervisor:
         TaskRouter.route(request)
         if request.task_type == "code":
             return self._enqueue_code_task(request, worktree=worktree)
+        if request.task_type == "experiment":
+            return self._enqueue_experiment_task(request)
         project = self._project_for(request.project, request.task_type)
         if request.task_type == "experiment-review":
             return self.start_experiment_review(
@@ -121,6 +129,24 @@ class TaskSupervisor:
             metadata=metadata,
         )
         return self._enqueue_code_task(request, worktree=worktree)
+
+    def start_experiment_task(
+        self,
+        project: str,
+        command_id: str,
+        *,
+        task_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Queue a registered experiment command on the shared async runtime."""
+        request = TaskRequest(
+            task_type="experiment",
+            project=project,
+            command_id=command_id,
+            task_id=task_id,
+            metadata=metadata,
+        )
+        return self._enqueue_experiment_task(request)
 
     def wait_for_task(self, task_id: str, *, timeout: Optional[float] = None) -> Any:
         """Wait for a submitted worker job while keeping state durable."""
@@ -371,6 +397,22 @@ class TaskSupervisor:
             raise
         return {"task_id": task_id, "state": SessionState.QUEUED.value, "project": request.project}
 
+    def _enqueue_experiment_task(self, request: TaskRequest) -> dict[str, Any]:
+        TaskRouter.route(request)
+        project = self._project_for(request.project, "experiment")
+        if not isinstance(request.command_id, str) or not request.command_id.strip():
+            raise ValueError("experiment task requires a command_id")
+        if request.command_id not in project.allowed_commands:
+            raise ValueError(f"command is not allowed or not registered: {request.command_id}")
+        task_id = request.task_id or self._new_task_id()
+        self._create_task(task_id, request, project)
+        try:
+            self.worker_queue.submit(task_id, self.task_runner.run, task_id)
+        except Exception as exc:
+            self._fail_task(task_id, exc)
+            raise
+        return {"task_id": task_id, "state": SessionState.QUEUED.value, "project": request.project}
+
     def recover_tasks(self) -> None:
         """Requeue queued code tasks and safely resume only verified active work."""
         for task_id in self.store.list_task_ids():
@@ -379,12 +421,13 @@ class TaskSupervisor:
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
             task_state = state.get("state", state.get("status"))
-            if task_state == SessionState.QUEUED.value and state.get("task_type", "code") == "code":
+            task_type = state.get("task_type", "code")
+            if task_state == SessionState.QUEUED.value and task_type in {"code", "experiment"}:
                 try:
                     self.worker_queue.submit(task_id, self.task_runner.run, task_id)
                 except ValueError:
                     continue
-            elif task_state in {SessionState.PREPARING.value, SessionState.RUNNING.value} and state.get("task_type", "code") == "code":
+            elif task_state in {SessionState.PREPARING.value, SessionState.RUNNING.value} and task_type == "code":
                 reason = self._recovery_resume_reason(state)
                 if reason is not None:
                     self._mark_recovery_unknown(task_id, str(task_state), reason)
@@ -406,6 +449,12 @@ class TaskSupervisor:
                         str(task_state),
                         f"Bridge could not schedule verified recovery: {type(exc).__name__}: {exc}",
                     )
+            elif task_state in {SessionState.PREPARING.value, SessionState.RUNNING.value} and task_type == "experiment":
+                self._mark_recovery_unknown(
+                    task_id,
+                    str(task_state),
+                    "Bridge restarted while a synchronous experiment command could be running; manual verification is required",
+                )
 
     def reconcile_task_events(self) -> None:
         for task_id in self.store.list_task_ids():
@@ -458,6 +507,9 @@ class TaskSupervisor:
             raise ValueError(f"task already exists: {task_id}")
         if not isinstance(request.acceptance, list):
             request.acceptance = []
+        metadata = dict(request.metadata or {})
+        if request.command_id is not None:
+            metadata["command_id"] = request.command_id
         self.store.create_task(
             task_id,
             project=request.project,
@@ -466,7 +518,7 @@ class TaskSupervisor:
             acceptance=request.acceptance,
             model=request.model,
             reasoning_effort=request.reasoning_effort,
-            **dict(request.metadata or {}),
+            **metadata,
         )
         bus = self._bus(task_id)
         bus.emit("task_created", {"project": request.project, "task_type": request.task_type})

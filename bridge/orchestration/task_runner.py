@@ -22,6 +22,16 @@ class CodeTaskHandler:
         return self.executor.execute(task)
 
 
+class ExperimentTaskHandler:
+    """Adapter that keeps experiment execution below the shared TaskRunner."""
+
+    def __init__(self, executor: TaskHandler):
+        self.executor = executor
+
+    def execute(self, task: dict[str, Any]) -> TaskResult:
+        return self.executor.execute(task)
+
+
 class TaskRunner:
     """Route one durable task to its handler and own failure conversion."""
 

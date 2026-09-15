@@ -88,7 +88,7 @@ limits:
 
 projects:
   unetmamba:
-    capabilities: [code, experiment-review]
+    capabilities: [code, experiment, experiment-review]
     root: "D:/Projects/UNetMamba"
     repo: "YOUR_NAME/UNetMamba"
     remote: origin
@@ -96,6 +96,8 @@ projects:
     allowed_commands:
       quick_test:
         argv: ["python", "-m", "pytest", "-q"]
+      train:
+        argv: ["python", "train.py", "--config", "configs/train.yaml"]
     artifact_dirs: ["outputs", "results", "runs"]
 ```
 
@@ -105,7 +107,7 @@ projects:
 
 YAML 中的 Windows 反斜杠路径必须使用单引号，例如 `root: 'E:\AI project bridge'`；也可以使用正斜杠，例如 `root: "E:/AI project bridge"`。不要把未转义的反斜杠放在 YAML 双引号中。
 
-项目通过 `capabilities` 声明允许的 task type：`code`、`presentation`、`experiment-review`；例如科研项目可同时声明 `code` 和 `experiment-review`。旧版单一 `kind` 仍会自动迁移为单元素 capabilities，便于渐进升级。
+项目通过 `capabilities` 声明允许的 task type：`code`、`presentation`、`experiment`、`experiment-review`；例如科研项目可同时声明 `code` 和 `experiment`。旧版单一 `kind` 仍会自动迁移为单元素 capabilities，便于渐进升级。
 
 `control_repo` 只承载任务 Issue、状态标签和评论；项目 `repo` 只来自本地配置，负责 `ai/issue-N` 分支和 Draft PR。项目 PR 只会写 `Control task: OWNER/ai-project-bridge#N`，不会使用 `Closes #N` 关闭项目仓库的同号 Issue。
 

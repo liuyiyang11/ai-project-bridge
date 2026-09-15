@@ -15,7 +15,7 @@ class ConfigError(ValueError):
     """Raised for missing, malformed, or unsafe local configuration."""
 
 
-ProjectCapability = Literal["code", "presentation", "experiment-review"]
+ProjectCapability = Literal["code", "presentation", "experiment-review", "experiment"]
 CodexBackend = Literal["app-server", "exec"]
 CodexRoutingPolicy = Literal["inherit", "explicit"]
 

@@ -30,7 +30,7 @@ class TaskRequest:
 class TaskRouter:
     """Map validated task types to the supervisor's executor paths."""
 
-    TASK_TYPES = frozenset({"code", "experiment-review", "presentation"})
+    TASK_TYPES = frozenset({"code", "experiment", "experiment-review", "presentation"})
 
     @classmethod
     def validate_type(cls, task_type: str) -> str:
