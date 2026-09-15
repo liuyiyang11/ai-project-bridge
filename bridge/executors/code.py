@@ -165,3 +165,66 @@ class CodeExecutor:
             ]
         )
 
+
+class RuntimeCodeExecutor:
+    """Run a queued code task without GitHub publication side effects."""
+
+    def __init__(self, config: Any, store: Any, session_manager: Any, worktree_preparer: Callable[[str, str], Any]):
+        self.config = config
+        self.store = store
+        self.session_manager = session_manager
+        self.worktree_preparer = worktree_preparer
+
+    def execute(self, task: dict[str, Any]) -> dict[str, Any]:
+        task_id = str(task["task_id"])
+        project_name = str(task["project"])
+        instruction = str(task.get("instruction", ""))
+        worktree_info = self.worktree_preparer(project_name, task_id)
+        worktree = Path(_value(worktree_info, "path", worktree_info)).resolve()
+        if not worktree.is_dir():
+            raise RuntimeError(f"prepared worktree does not exist: {worktree}")
+        self.store.update_task(
+            task_id,
+            worktree=str(worktree),
+            worktree_path=str(worktree),
+            branch=_value(worktree_info, "branch"),
+            base_branch=_value(worktree_info, "base_branch"),
+            base_head=_value(worktree_info, "base_head"),
+        )
+        run = self.store.begin_run(task_id, "initial")
+        events_path = self.store.task_dir(task_id) / run["events_path"]
+        try:
+            record = self.session_manager.start_task(
+                task_id,
+                project_name,
+                worktree,
+                instruction,
+                model=task.get("model"),
+                reasoning_effort=task.get("reasoning_effort"),
+                events_path=events_path,
+            )
+            self.store.update_task(task_id, thread_id=getattr(record, "thread_id", None), turn_id=getattr(record, "turn_id", None))
+            timeout = getattr(getattr(self.config, "codex", None), "turn_timeout_seconds", 86400)
+            result = self.session_manager.wait_for_completion(task_id, timeout=float(timeout))
+            status = self.session_manager.status(task_id)
+            self.store.update_task(
+                task_id,
+                thread_id=status.get("thread_id"),
+                turn_id=status.get("turn_id"),
+                changed_files=list(status.get("changed_files", [])),
+            )
+            self.store.finish_run(
+                task_id,
+                run["number"],
+                status="completed" if int(getattr(result, "exit_code", 1)) == 0 else "failed",
+                returned_thread_id=getattr(result, "thread_id", None),
+                returned_turn_id=getattr(result, "turn_id", None),
+                exit_code=int(getattr(result, "exit_code", 1)),
+            )
+            if int(getattr(result, "exit_code", 1)) != 0:
+                raise RuntimeError(f"Codex task exited with code {result.exit_code}")
+            return self.store.get_task(task_id)
+        except Exception as exc:
+            self.store.finish_run(task_id, run["number"], status="failed", error=f"{type(exc).__name__}: {exc}")
+            raise
+
