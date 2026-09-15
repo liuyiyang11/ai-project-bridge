@@ -1,8 +1,36 @@
-# AI Project Bridge V0.2 (V0.1-compatible)
+# AI Project Bridge V0.2.1 (V0.1-compatible)
 
 AI Project Bridge 是一个运行在 Windows 11 本机的前台 Python 程序。它把 GitHub 私有仓库 Issue 作为任务总线，把需要推理和编辑的工作交给本地 Codex CLI，把测试、Git 检查、实验评估和 artifact 收集交给确定性脚本。
 
 Bridge 不执行远程 Issue 或 MCP 请求中的任意 shell、PowerShell、Python、绝对路径或环境变量。真实项目根目录和允许执行的 argv 只能来自本机、被 `.gitignore` 忽略的 `config.local.yaml`。GitHub Issue 仍然是兼容的任务入口；V0.2 另外提供 transport-independent Supervisor 和本地 MCP stdio adapter。
+
+## V0.2.1：代码任务异步运行时
+
+V0.2.1 只收敛并加固 `code` task 的异步运行时，不新增业务功能。代码任务的唯一运行时调用链为：
+
+```text
+MCP / Transport
+      ↓
+TaskSupervisor
+      ↓
+WorkerQueue
+      ↓
+TaskRunner
+      ↓
+TaskHandler
+      ↓
+Executor
+      ↓
+CodexSessionManager
+```
+
+`bridge_start_code_task` 调用 `TaskSupervisor.start_code_task()`；Supervisor 先持久化 `QUEUED` task snapshot，再提交后台 Future，并立即返回 `task_id`、`state: "QUEUED"` 和 `project`。它不会等待 worktree、Codex session 或 turn 完成。
+
+TaskStore 中的 task snapshot 是业务状态的唯一读取来源；调用方不会从 WorkerQueue/Future 推断任务状态。TaskEventBus（本文简称 EventBus）是运行时状态迁移和事件写入的唯一入口：它追加事件、维护每任务单调 `event_seq`，并同步更新 snapshot state。TaskStore 只承担持久化读写、非状态 metadata 和 artifact manifest；业务代码不得直接以 `update_task(state=...)` 改变状态。
+
+WorkerQueue 只管理 Future 的提交、取消和关闭，不定义 `QUEUED`/`RUNNING`/`FAILED`/`COMPLETED` 等业务状态。TaskRunner 负责 `QUEUED → PREPARING → RUNNING → WAITING_REVIEW` 生命周期和异常转换；TaskHandler 返回显式 `TaskResult`，Runner 只依据该结果决定 review-ready 或 failed，不通过读取 snapshot 猜测执行结果。Executor 负责 worktree、Codex 调用和文件修改。
+
+`experiment-review` 与 `presentation` 保留现有兼容接口，但没有迁移到这条 V0.2.1 异步代码任务路径。WPS、Dashboard 和 Web API 均不属于本轮范围。
 
 ## 1. 安装
 
@@ -133,13 +161,17 @@ codex exec --json --sandbox workspace-write --approve-for-me --cd <worktree> -
 
 随后执行本地 `quick_test`（如果已配置），收集 Git status/diff，commit，push issue branch，并创建 Draft PR。不会 push `main`/`master`，不会自动 merge。app-server 的 thread/turn ID 和安全事件会写入本地 TaskStore，Bridge 重启后可使用 `thread/resume`。
 
-## 7. 创建 presentation task
+## 7. 创建 presentation task（兼容接口，未迁移到 V0.2.1 runtime）
+
+presentation 的已有入口和行为继续保留；它不使用 V0.2.1 code-task 的 WorkerQueue/TaskRunner 生命周期契约，也不是本轮扩展目标。
 
 登记 `capabilities: [presentation]` 项目，在 Issue 中使用 `examples/presentation-task.md`。`brief`、`slides_spec`、`assets_dir`、`template` 都必须是项目 root 下的相对路径。
 
 Codex 在隔离 worktree 中生成/修改 PPTX。Bridge 会在提交前渲染 PPTX，并把有界的 `final.pdf`、`contact_sheet.png` 和 `slides_png/slide_*.png` 写入同一 `ai/issue-N` 分支的 `review_bundle/presentation/`，因此原 Draft PR 可直接在 ChatGPT Web 审查。Windows 上优先通过 PowerPoint COM 检测 Office，不要求 `POWERPNT.EXE` 在 PATH；不可用时尝试 LibreOffice。每次 doctor 会分别报告 PowerPoint COM、LibreOffice 和 PDF→PNG 能力。请用 `.[presentation]` 安装可选渲染依赖。
 
-## 8. 创建 experiment-review task
+## 8. 创建 experiment-review task（兼容接口，未迁移到 V0.2.1 runtime）
+
+experiment-review 的已有入口和行为继续保留；它不使用 V0.2.1 code-task 的 WorkerQueue/TaskRunner 生命周期契约，也不是本轮扩展目标。
 
 使用 `examples/experiment-review-task.md` 并添加：
 
@@ -225,6 +257,8 @@ $Python = 'E:\anaconda\envs\py39\python.exe'
 ```
 
 本地 MCP 只服务兼容 MCP 的客户端。普通 ChatGPT Plus 对话不能被假设为可以直接连接 local MCP，因此当前云端使用方式仍是 GitHub transport。工具列表和输入边界见 [docs/mcp-tools.md](docs/mcp-tools.md)。
+
+对 code task，MCP 入口固定为 `bridge_start_code_task → TaskSupervisor.start_code_task()`；它不会依据 `task_type` 走通用 `start_task()` 分支，也不会直接创建 Codex session。
 
 ## 14. 安全边界
 

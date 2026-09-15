@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -38,6 +39,7 @@ class SessionRecord:
     model: Optional[str] = None
     reasoning_effort: Optional[str] = None
     state: SessionState = SessionState.QUEUED
+    manage_task_lifecycle: bool = True
     event_seq: int = 0
     current_action: str = "queued"
     changed_files: list[str] = field(default_factory=list)
@@ -118,6 +120,7 @@ class CodexSessionManager:
         reasoning_effort: Optional[str] = None,
         resume_thread_id: Optional[str] = None,
         events_path: Optional[Path] = None,
+        manage_task_lifecycle: bool = True,
     ) -> SessionRecord:
         self._validate_task_id(task_id)
         if not isinstance(instruction, str) or not instruction.strip():
@@ -131,17 +134,24 @@ class CodexSessionManager:
             if task_id in self.sessions:
                 self._close_client(task_id)
             stored_state = SessionState.QUEUED
+            stored_event_seq = 0
             if self.store and self.store.exists(task_id):
                 try:
-                    stored_value = self.store.get_task(task_id).get("state", SessionState.QUEUED.value)
+                    snapshot = self.store.get_task(task_id)
+                    stored_value = snapshot.get("state", SessionState.QUEUED.value)
                     stored_state = SessionState(stored_value)
+                    stored_event_seq = max(0, int(snapshot.get("last_event_seq", snapshot.get("event_seq", 0))))
                 except (ValueError, TypeError):
                     stored_state = SessionState.QUEUED
+            if not manage_task_lifecycle and stored_state == SessionState.INTERRUPTED:
+                raise SessionTransitionError("task was interrupted before Codex session start")
             record = SessionRecord(
                 task_id=task_id,
                 project=project,
                 worktree=worktree,
                 state=stored_state,
+                manage_task_lifecycle=bool(manage_task_lifecycle),
+                event_seq=stored_event_seq,
                 current_action="queued" if stored_state == SessionState.QUEUED else "starting app-server",
                 model=model,
                 reasoning_effort=reasoning_effort,
@@ -228,6 +238,7 @@ class CodexSessionManager:
         record.last_error = None
         record.final_message = ""
         record.message_parts.clear()
+        self._take_over_lifecycle_for_control(record)
         self._set_state(record, SessionState.RUNNING, "continuing turn")
         try:
             response = self._clients[task_id].turn_start(
@@ -259,6 +270,7 @@ class CodexSessionManager:
     def interrupt_task(self, task_id: str) -> SessionRecord:
         record = self._get(task_id)
         self._require_state(record, {SessionState.RUNNING}, "interrupt")
+        self._take_over_lifecycle_for_control(record)
         self._clients[task_id].turn_interrupt(record.thread_id or "", record.active_turn_id or "")
         self._set_state(record, SessionState.INTERRUPTED, "interrupted")
         record.completion.set()
@@ -267,14 +279,28 @@ class CodexSessionManager:
     def accept_task(self, task_id: str) -> SessionRecord:
         record = self._get(task_id)
         self._require_state(record, {SessionState.WAITING_REVIEW}, "accept")
+        self._take_over_lifecycle_for_control(record)
         self._set_state(record, SessionState.COMPLETED, "accepted")
         self._close_client(task_id)
         return record
 
     def wait_for_completion(self, task_id: str, *, timeout: Optional[float] = None) -> SessionResult:
         record = self._get(task_id)
-        if not record.completion.wait(timeout=timeout):
-            raise CodexProtocolError(f"timed out waiting for task turn: {task_id}")
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        while not record.completion.is_set():
+            client = self._clients.get(task_id)
+            drain = getattr(client, "drain_notifications", None)
+            if callable(drain):
+                drain(limit=100)
+            if record.completion.is_set():
+                break
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CodexProtocolError(f"timed out waiting for task turn: {task_id}")
+                record.completion.wait(timeout=min(0.05, remaining))
+            else:
+                record.completion.wait(timeout=0.05)
         if record.state == SessionState.FAILED:
             raise CodexProcessError(record.last_error or "Codex task failed")
         return SessionResult(
@@ -460,11 +486,10 @@ class CodexSessionManager:
             "item/fileChange/patchUpdated": "file_changed",
             "warning": "warning",
             "error": "error",
-            "thread/status/changed": "state_changed",
+            "thread/status/changed": "thread_status_changed",
+            "turn/plan/updated": "turn_plan_updated",
         }.get(method, method.replace("/", "_"))
-        if method in {"turn/plan/updated"}:
-            mapped = "state_changed"
-        elif method in {"item/started", "item/completed"}:
+        if method in {"item/started", "item/completed"}:
             item = params.get("item") if isinstance(params.get("item"), dict) else params
             item_type = str(item.get("type", "")) if isinstance(item, dict) else ""
             if "commandExecution" in item_type or "command_execution" in item_type:
@@ -492,25 +517,44 @@ class CodexSessionManager:
     def _persist(self, record: SessionRecord) -> None:
         if not self.store or not self.store.exists(record.task_id):
             return
-        self.store.update_state(
-            record.task_id,
-            stage=record.current_action,
-            current_action=record.current_action,
-            thread_id=record.thread_id,
-            turn_id=record.active_turn_id,
-            model=record.model,
-            reasoning_effort=record.reasoning_effort,
-            event_seq=record.event_seq,
-            changed_files=list(record.changed_files),
-            review_ready=record.state == SessionState.WAITING_REVIEW,
-            last_error=record.last_error,
-        )
+        updates = {
+            "thread_id": record.thread_id,
+            "turn_id": record.active_turn_id,
+            "model": record.model,
+            "reasoning_effort": record.reasoning_effort,
+            "changed_files": list(record.changed_files),
+            "last_error": record.last_error,
+        }
+        if record.manage_task_lifecycle:
+            updates.update(
+                stage=record.current_action,
+                current_action=record.current_action,
+                review_ready=record.state == SessionState.WAITING_REVIEW,
+            )
+        self.store.update_task(record.task_id, **updates)
+
+    def _take_over_lifecycle_for_control(self, record: SessionRecord) -> None:
+        """Hand durable lifecycle ownership back to EventBus for a control turn."""
+        if record.manage_task_lifecycle:
+            return
+        if self.store is not None and self.store.exists(record.task_id):
+            snapshot = self.store.get_task(record.task_id)
+            stored_state = str(snapshot.get("state", snapshot.get("status", "")))
+            if stored_state != record.state.value:
+                raise SessionTransitionError(
+                    f"durable task state {stored_state!r} does not match active session state {record.state.value!r}"
+                )
+            try:
+                record.event_seq = max(record.event_seq, int(snapshot.get("last_event_seq", snapshot.get("event_seq", 0))))
+            except (TypeError, ValueError):
+                pass
+        record.manage_task_lifecycle = True
 
     def _set_state(self, record: SessionRecord, state: SessionState, action: str) -> None:
         old = record.state
         record.state = state
         record.current_action = action
-        if old != state:
+        if old != state and record.manage_task_lifecycle:
             bus = self._bus(record)
             if bus is not None:
                 emitted = bus.transition(

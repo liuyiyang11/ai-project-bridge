@@ -65,6 +65,7 @@ class CodexAppServerClient:
         self._next_id = 1
         self._inbound: queue.Queue[Any] = queue.Queue()
         self._pending: dict[Any, dict[str, Any]] = {}
+        self._pending_lock = threading.RLock()
         self._write_lock = threading.Lock()
         self._reader: Optional[threading.Thread] = None
         self._started = False
@@ -220,26 +221,36 @@ class CodexAppServerClient:
     def request(self, method: str, params: Optional[dict[str, Any]] = None, *, timeout: Optional[float] = None) -> dict[str, Any]:
         if not self._started or self._closed:
             raise CodexProtocolError("Codex app-server client is not running")
-        message_id = self._next_id
-        self._next_id += 1
+        with self._pending_lock:
+            message_id = self._next_id
+            self._next_id += 1
         self._write(request_payload(message_id, method, params))
         deadline = time.monotonic() + float(self.request_timeout if timeout is None else timeout)
         while True:
-            pending = self._pending.pop(message_id, None)
+            with self._pending_lock:
+                pending = self._pending.pop(message_id, None)
             if pending is not None:
                 message = JsonRpcMessage(pending)
             else:
                 remaining = max(0.0, deadline - time.monotonic())
                 if remaining == 0:
                     raise CodexProtocolTimeout(f"timed out waiting for app-server response to {method}")
-                item = self._get_inbound(remaining)
+                try:
+                    # A SessionManager wait loop may pump notifications in a
+                    # second thread and place this request's response in
+                    # ``_pending``. Polling the inbound queue bounds how long
+                    # this request waits before checking that handoff.
+                    item = self._get_inbound(min(0.05, remaining))
+                except CodexProtocolTimeout:
+                    continue
                 if item is None:
                     raise CodexProcessError("Codex app-server exited while handling request", returncode=self._returncode(), stderr=self.stderr)
                 message = item
             if message.is_response:
                 if message.message_id != message_id:
                     if message.message_id is not None:
-                        self._pending[message.message_id] = message.value
+                        with self._pending_lock:
+                            self._pending[message.message_id] = message.value
                     continue
                 if "error" in message.value:
                     error = message.value.get("error") or {}
@@ -258,11 +269,21 @@ class CodexAppServerClient:
             except queue.Empty:
                 break
             if item is None:
+                # Preserve the reader's EOF sentinel for an in-flight request.
+                # Otherwise a concurrent notification pump could consume it and
+                # make that request wait until its timeout instead of reporting
+                # the process exit promptly.
+                self._inbound.put(None)
                 break
+            if item.is_response:
+                if item.message_id is not None:
+                    with self._pending_lock:
+                        self._pending[item.message_id] = item.value
+                continue
             safe = safe_notification(item)
             if safe:
                 result.append(safe)
-                self._call_notification_handler(safe)
+            self._handle_notification(item)
         return result
 
     def close(self) -> None:

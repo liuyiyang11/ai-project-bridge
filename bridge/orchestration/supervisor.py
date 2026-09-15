@@ -214,8 +214,8 @@ class TaskSupervisor:
             raise ValueError(f"{action} requires a non-empty instruction")
         if action == "accept":
             try:
-                record = self.session_manager.accept_task(task_id)
-                return record.public_dict()
+                self.session_manager.accept_task(task_id)
+                return self.status(task_id)
             except SessionTransitionError:
                 state = self._stored_state(task_id)
                 if state.get("state", state.get("status")) != SessionState.WAITING_REVIEW.value:
@@ -230,7 +230,20 @@ class TaskSupervisor:
         elif action == "steer":
             self.session_manager.steer_task(task_id, instruction or "")
         else:
-            self.session_manager.interrupt_task(task_id)
+            try:
+                self.session_manager.interrupt_task(task_id)
+            except SessionTransitionError:
+                state = self._stored_state(task_id)
+                current = str(state.get("state", state.get("status", "")))
+                if state.get("task_type", "code") != "code" or current not in {
+                    SessionState.PREPARING.value,
+                    SessionState.RUNNING.value,
+                }:
+                    raise
+                self._bus(task_id).transition(current, SessionState.INTERRUPTED.value, "interrupt requested before Codex session started")
+                cancel = getattr(self.worker_queue, "cancel", None)
+                if callable(cancel):
+                    cancel(task_id)
         return self.status(task_id)
 
     def task_status(self, task_id: str) -> dict[str, Any]:
@@ -314,7 +327,7 @@ class TaskSupervisor:
         return {"task_id": task_id, "state": SessionState.QUEUED.value, "project": request.project}
 
     def recover_tasks(self) -> None:
-        """Requeue durable queued work and make unverifiable active work explicit."""
+        """Requeue queued code tasks and safely resume only verified active work."""
         for task_id in self.store.list_task_ids():
             try:
                 state = self.store.get_task(task_id)
@@ -326,12 +339,28 @@ class TaskSupervisor:
                     self.worker_queue.submit(task_id, self.task_runner.run, task_id)
                 except ValueError:
                     continue
-            elif task_state in {SessionState.PREPARING.value, SessionState.RUNNING.value}:
-                self._bus(task_id).transition(
-                    str(task_state),
-                    SessionState.UNKNOWN.value,
-                    "Bridge restarted before active Codex session could be verified",
+            elif task_state in {SessionState.PREPARING.value, SessionState.RUNNING.value} and state.get("task_type", "code") == "code":
+                reason = self._recovery_resume_reason(state)
+                if reason is not None:
+                    self._mark_recovery_unknown(task_id, str(task_state), reason)
+                    continue
+                self.store.update_task(
+                    task_id,
+                    resume_thread_id=state["thread_id"],
+                    recovery_checked_at=utc_now(),
                 )
+                try:
+                    self.worker_queue.submit(task_id, self.task_runner.run, task_id, recovery=True)
+                except ValueError:
+                    # A previous recovery pass already owns this Future.  Its
+                    # durable state remains the source of truth.
+                    continue
+                except Exception as exc:
+                    self._mark_recovery_unknown(
+                        task_id,
+                        str(task_state),
+                        f"Bridge could not schedule verified recovery: {type(exc).__name__}: {exc}",
+                    )
 
     def reconcile_task_events(self) -> None:
         for task_id in self.store.list_task_ids():
@@ -345,6 +374,39 @@ class TaskSupervisor:
         project = self._project_for(project_name, "code")
         supplied = state.get("supplied_worktree")
         return self._prepare_worktree(project, project_name, task_id, Path(supplied) if isinstance(supplied, str) else None)
+
+    def _recovery_resume_reason(self, state: dict[str, Any]) -> Optional[str]:
+        project_name = state.get("project")
+        if not isinstance(project_name, str) or not project_name:
+            return "Bridge restarted with no registered project for the active task"
+        try:
+            self._project_for(project_name, "code")
+        except Exception:
+            return "Bridge restarted with an unavailable code-capable project"
+        instruction = state.get("instruction")
+        if not isinstance(instruction, str) or not instruction.strip():
+            return "Bridge restarted with no safe task instruction to resume"
+        thread_id = state.get("thread_id")
+        if not isinstance(thread_id, str) or not thread_id:
+            return "Bridge restarted before the active Codex thread was persisted"
+        worktree_value = state.get("worktree_path", state.get("worktree"))
+        if not isinstance(worktree_value, str) or not worktree_value or not Path(worktree_value).is_absolute():
+            return "Bridge restarted with no trusted task worktree"
+        try:
+            worktree = Path(worktree_value).resolve()
+            root = (self.config.state_root / "worktrees").resolve()
+            relative = worktree.relative_to(root)
+        except (OSError, ValueError):
+            return "Bridge restarted with a worktree outside the Bridge worktree root"
+        if relative == Path(".") or not worktree.is_dir():
+            return "Bridge restarted with a missing or invalid task worktree"
+        return None
+
+    def _mark_recovery_unknown(self, task_id: str, current: str, reason: str) -> None:
+        if TaskStateMachine.can_transition(current, SessionState.UNKNOWN.value):
+            self._bus(task_id).transition(current, SessionState.UNKNOWN.value, reason)
+        self.store.update_task(task_id, last_error=reason[:2000])
+        self._bus(task_id).emit("error", {"message": reason[:2000], "previous_state": current})
 
     def _create_task(self, task_id: str, request: TaskRequest, project: Any) -> dict[str, Any]:
         if self.store.exists(task_id):
@@ -362,7 +424,7 @@ class TaskSupervisor:
         )
         bus = self._bus(task_id)
         bus.emit("task_created", {"project": request.project, "task_type": request.task_type})
-        bus.emit("state_changed", {"from": None, "to": SessionState.QUEUED.value, "reason": "queued"})
+        bus.transition(None, SessionState.QUEUED.value, "queued")
         return self.store.get_task(task_id)
 
     def _prepare_worktree(self, project: Any, project_name: str, task_id: str, supplied: Optional[Path]) -> Any:

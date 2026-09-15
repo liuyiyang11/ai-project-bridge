@@ -4,6 +4,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -19,6 +20,8 @@ class TaskStore:
     """Filesystem-backed task snapshots, events, logs, and manifests."""
 
     _FILES = ("task.json", "task.yaml", "state.json", "events.jsonl", "stdout.log", "stderr.log", "result.json")
+    _task_locks_guard = threading.Lock()
+    _task_locks: dict[str, threading.RLock] = {}
 
     def __init__(self, root: Path):
         self.root = Path(root)
@@ -42,6 +45,13 @@ class TaskStore:
         if name not in self._FILES:
             raise ValueError(f"unsupported task file: {name}")
         return self.task_dir(task_id) / name
+
+    def task_lock(self, task_id: Union[int, str]) -> threading.RLock:
+        """Return the cross-instance lock for one task's snapshot and journal."""
+        key = self._task_key(task_id)
+        lock_key = f"{self.root.resolve()}::{key}"
+        with self._task_locks_guard:
+            return self._task_locks.setdefault(lock_key, threading.RLock())
 
     def create_task(
         self,
@@ -150,49 +160,73 @@ class TaskStore:
 
     def update_task(self, task_id: Union[int, str], **updates: Any) -> dict[str, Any]:
         key = self._task_key(task_id)
-        state = self.get_task(key)
-        current = str(state.get("state", state.get("status", "")))
-        requested_state = getattr(updates.get("state"), "value", updates.get("state"))
-        requested_status = getattr(updates.get("status"), "value", updates.get("status"))
-        if "state" in updates and str(requested_state) != current:
-            raise ValueError("state changes require transition_task")
-        if "status" in updates and str(requested_status) in TASK_TRANSITIONS and str(requested_status) != current:
-            raise ValueError("lifecycle status changes require transition_task")
-        state.update(updates)
-        if "worktree_path" in updates and "worktree" not in updates:
-            state["worktree"] = updates["worktree_path"]
-        if "worktree" in updates and "worktree_path" not in updates:
-            state["worktree_path"] = updates["worktree"]
-        state["updated_at"] = utc_now()
-        self._write_compat_files(key, state, task_yaml=None)
-        return self.get_task(key)
+        with self.task_lock(key):
+            state = self.get_task(key)
+            current = str(state.get("state", state.get("status", "")))
+            requested_state = getattr(updates.get("state"), "value", updates.get("state"))
+            requested_status = getattr(updates.get("status"), "value", updates.get("status"))
+            if "state" in updates and str(requested_state) != current:
+                raise ValueError("state changes require transition_task")
+            if "status" in updates and str(requested_status) in TASK_TRANSITIONS and str(requested_status) != current:
+                raise ValueError("lifecycle status changes require transition_task")
+            state.update(updates)
+            if "worktree_path" in updates and "worktree" not in updates:
+                state["worktree"] = updates["worktree_path"]
+            if "worktree" in updates and "worktree_path" not in updates:
+                state["worktree_path"] = updates["worktree"]
+            state["updated_at"] = utc_now()
+            self._write_compat_files(key, state, task_yaml=None)
+            return self.get_task(key)
 
     def update_state(self, task_id: Union[int, str], **updates: Any) -> dict[str, Any]:
         return self.update_task(task_id, **updates)
 
     def transition_task(self, task_id: Union[int, str], from_state: str, to_state: str, reason: str) -> dict[str, Any]:
+        """Compatibility transition helper for pre-runtime callers.
+
+        New runtime code must enter lifecycle changes through
+        ``TaskEventBus.transition``.  That boundary uses ``_apply_transition``
+        below so the state, event cursor, and transition metadata are written
+        as one snapshot update.
+        """
+        return self._apply_transition(task_id, from_state, to_state, reason)
+
+    def _apply_transition(
+        self,
+        task_id: Union[int, str],
+        from_state: str,
+        to_state: str,
+        reason: str,
+        *,
+        updates: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
         key = self._task_key(task_id)
-        state = self.get_task(key)
-        from_state = getattr(from_state, "value", from_state)
-        to_state = getattr(to_state, "value", to_state)
-        current = str(state.get("state", state.get("status", "")))
-        if current != str(from_state):
-            raise ValueError(f"task state changed: expected {from_state}, found {current}")
-        allowed = TASK_TRANSITIONS.get(current, set())
-        if str(to_state) not in allowed:
-            raise ValueError(f"invalid task transition: {current} -> {to_state}")
-        state.update(
-            {
-                "state": str(to_state),
-                "status": str(to_state),
-                "stage": str(reason),
-                "current_action": str(reason),
-                "last_transition_reason": str(reason),
-            }
-        )
-        state["updated_at"] = utc_now()
-        self._write_compat_files(key, state, task_yaml=None)
-        return self.get_task(key)
+        with self.task_lock(key):
+            state = self.get_task(key)
+            from_state = getattr(from_state, "value", from_state)
+            to_state = getattr(to_state, "value", to_state)
+            current = str(state.get("state", state.get("status", "")))
+            if current != str(from_state):
+                raise ValueError(f"task state changed: expected {from_state}, found {current}")
+            allowed = TASK_TRANSITIONS.get(current, set())
+            if str(to_state) not in allowed:
+                raise ValueError(f"invalid task transition: {current} -> {to_state}")
+            extra = dict(updates or {})
+            if {"state", "status"}.intersection(extra):
+                raise ValueError("transition updates cannot replace lifecycle state")
+            state.update(extra)
+            state.update(
+                {
+                    "state": str(to_state),
+                    "status": str(to_state),
+                    "stage": str(reason),
+                    "current_action": str(reason),
+                    "last_transition_reason": str(reason),
+                }
+            )
+            state["updated_at"] = utc_now()
+            self._write_compat_files(key, state, task_yaml=None)
+            return self.get_task(key)
 
     def exists(self, task_id: Union[int, str]) -> bool:
         return self.task_path(task_id, "state.json").is_file() or self.task_path(task_id, "task.json").is_file()
@@ -261,13 +295,14 @@ class TaskStore:
     def append_event(self, task_id: Union[int, str], event: dict[str, Any]) -> None:
         if not isinstance(event, dict):
             raise ValueError("event must be an object")
-        event_record = dict(event)
-        event_record.setdefault("time", utc_now())
-        self.task_path(task_id, "events.jsonl").parent.mkdir(parents=True, exist_ok=True)
-        with self.task_path(task_id, "events.jsonl").open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(event_record, ensure_ascii=False) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        with self.task_lock(task_id):
+            event_record = dict(event)
+            event_record.setdefault("time", utc_now())
+            self.task_path(task_id, "events.jsonl").parent.mkdir(parents=True, exist_ok=True)
+            with self.task_path(task_id, "events.jsonl").open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps(event_record, ensure_ascii=False) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
 
     def list_events(self, task_id: Union[int, str], *, after_seq: int = 0, limit: int = 100) -> list[dict[str, Any]]:
         if isinstance(after_seq, bool) or int(after_seq) < 0:

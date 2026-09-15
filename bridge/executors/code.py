@@ -176,12 +176,36 @@ class RuntimeCodeExecutor:
         self.session_manager = session_manager
         self.worktree_preparer = worktree_preparer
 
-    def execute(self, task: dict[str, Any]) -> dict[str, Any]:
+    def execute(self, task: dict[str, Any]) -> "TaskResult":
         task_id = str(task["task_id"])
         project_name = str(task["project"])
         instruction = str(task.get("instruction", ""))
-        worktree_info = self.worktree_preparer(project_name, task_id)
-        worktree = Path(_value(worktree_info, "path", worktree_info)).resolve()
+        if self.store.get_task(task_id).get("state") == "INTERRUPTED":
+            from ..orchestration.models import TaskResult
+
+            return TaskResult(success=True, review_ready=False, message="task interrupted")
+        resume_thread_id = task.get("resume_thread_id")
+        if resume_thread_id is not None and (not isinstance(resume_thread_id, str) or not resume_thread_id):
+            raise RuntimeError("recovery task has an invalid saved thread id")
+        if isinstance(resume_thread_id, str):
+            saved_worktree = task.get("worktree_path", task.get("worktree"))
+            if not isinstance(saved_worktree, str) or not saved_worktree:
+                raise RuntimeError("recovery task has no saved worktree")
+            worktree_info = task
+            worktree = Path(saved_worktree).resolve()
+            state_root = getattr(self.config, "state_root", None)
+            if state_root is None:
+                raise RuntimeError("recovery task has no trusted Bridge worktree root")
+            try:
+                worktree_root = (Path(state_root) / "worktrees").resolve()
+                relative = worktree.relative_to(worktree_root)
+            except (OSError, ValueError) as exc:
+                raise RuntimeError("recovery task worktree is outside the trusted Bridge worktree root") from exc
+            if relative == Path("."):
+                raise RuntimeError("recovery task worktree is not a trusted Bridge worktree")
+        else:
+            worktree_info = self.worktree_preparer(project_name, task_id)
+            worktree = Path(_value(worktree_info, "path", worktree_info)).resolve()
         if not worktree.is_dir():
             raise RuntimeError(f"prepared worktree does not exist: {worktree}")
         self.store.update_task(
@@ -202,7 +226,9 @@ class RuntimeCodeExecutor:
                 instruction,
                 model=task.get("model"),
                 reasoning_effort=task.get("reasoning_effort"),
+                resume_thread_id=resume_thread_id,
                 events_path=events_path,
+                manage_task_lifecycle=False,
             )
             self.store.update_task(task_id, thread_id=getattr(record, "thread_id", None), turn_id=getattr(record, "turn_id", None))
             timeout = getattr(getattr(self.config, "codex", None), "turn_timeout_seconds", 86400)
@@ -223,24 +249,48 @@ class RuntimeCodeExecutor:
                     continue
                 if artifact_path.is_file():
                     artifacts.append({"path": relative, "size": artifact_path.stat().st_size, "kind": "file"})
-            manifest = self.store.save_artifacts(task_id, artifacts)
-            from ..orchestration.event_bus import TaskEventBus
-
-            bus = TaskEventBus(self.store, task_id)
-            for artifact in manifest:
-                bus.emit("artifact_created", {"path": artifact.get("path"), "size": artifact.get("size"), "kind": artifact.get("kind")})
+            exit_code = int(getattr(result, "exit_code", 1))
+            interrupted = exit_code == 130 and status.get("state") == "INTERRUPTED"
             self.store.finish_run(
                 task_id,
                 run["number"],
-                status="completed" if int(getattr(result, "exit_code", 1)) == 0 else "failed",
+                status="completed" if exit_code == 0 else "interrupted" if interrupted else "failed",
                 returned_thread_id=getattr(result, "thread_id", None),
                 returned_turn_id=getattr(result, "turn_id", None),
-                exit_code=int(getattr(result, "exit_code", 1)),
+                exit_code=exit_code,
             )
-            if int(getattr(result, "exit_code", 1)) != 0:
+            # Import lazily: ``bridge.orchestration`` exposes Supervisor from
+            # its package initializer, which also imports this executor.
+            from ..orchestration.models import TaskResult
+
+            metadata = {
+                "thread_id": status.get("thread_id"),
+                "turn_id": status.get("turn_id"),
+                "changed_files": list(status.get("changed_files", [])),
+            }
+            if interrupted:
+                return TaskResult(
+                    success=True,
+                    review_ready=False,
+                    message="task interrupted",
+                    artifacts=artifacts,
+                    metadata=metadata,
+                )
+            if exit_code != 0:
                 raise RuntimeError(f"Codex task exited with code {result.exit_code}")
-            return self.store.get_task(task_id)
+            return TaskResult(
+                success=True,
+                review_ready=status.get("state") == "WAITING_REVIEW",
+                message=str(getattr(result, "final_message", "")),
+                artifacts=artifacts,
+                metadata=metadata,
+            )
         except Exception as exc:
+            if self.store.get_task(task_id).get("state") == "INTERRUPTED":
+                self.store.finish_run(task_id, run["number"], status="interrupted")
+                from ..orchestration.models import TaskResult
+
+                return TaskResult(success=True, review_ready=False, message="task interrupted")
             self.store.finish_run(task_id, run["number"], status="failed", error=f"{type(exc).__name__}: {exc}")
             raise
 

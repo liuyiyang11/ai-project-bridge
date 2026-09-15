@@ -9,3 +9,5 @@ __pycache__/
 venv/
 github 令牌.txt
 
+
+.pytest-*

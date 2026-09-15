@@ -1,4 +1,5 @@
 from .event_bus import TaskEventBus
+from .models import TaskResult
 from .router import TaskRequest, TaskRouter
 from .state_machine import InvalidTaskTransition, TaskStateMachine
 from .supervisor import TaskSupervisor
@@ -11,6 +12,7 @@ __all__ = [
     "TaskEventBus",
     "TaskHandler",
     "TaskRequest",
+    "TaskResult",
     "TaskRouter",
     "TaskRunner",
     "TaskStateMachine",

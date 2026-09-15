@@ -1,35 +1,76 @@
-# AI Project Bridge V0.2 architecture
+# AI Project Bridge V0.2.1 architecture
 
-V0.2 keeps the V0.1 worktree, workspace-write, deterministic test, experiment-review, presentation-review, and optional Draft PR workflow.  The execution core is now transport-independent:
+V0.2.1 hardens the durable asynchronous runtime for `code` tasks only. It retains the V0.1/V0.2 worktree, workspace-write, security validation, deterministic-command, and transport boundaries, without adding a new product runtime.
 
-```text
-GitHub Issue / MCP stdio
-          |
-Unified TaskSupervisor
-          |
-CodexSessionManager + TaskEventBus + TaskStore
-          |
-Code / Experiment Review / Presentation paths
-```
+## Code-task runtime boundary
 
-## Phase 1
-
-`CodexAppServerClient` starts the bundled native Codex executable with:
+The code-task call chain is fixed:
 
 ```text
-codex app-server --stdio
+MCP / Transport
+      ↓
+TaskSupervisor
+      ↓
+WorkerQueue
+      ↓
+TaskRunner
+      ↓
+TaskHandler
+      ↓
+Executor
+      ↓
+CodexSessionManager
 ```
 
-It performs the JSON-RPC `initialize`/`initialized` handshake, then supports `model/list`, `thread/start`, `thread/resume`, `turn/start`, `turn/steer`, and `turn/interrupt`.  Notifications are read continuously from stdout and stderr is captured separately.  Raw reasoning notifications are discarded before persistence.
+Transport code validates input and calls the Supervisor; it does not create a worktree, start Codex, or infer state from a worker Future. For MCP code startup, the entry point is `bridge_start_code_task → TaskSupervisor.start_code_task()`. The generic `start_task()` router may remain for internal compatibility, but MCP does not select the code path by inspecting `task_type`.
 
-`CodexModelCatalog` validates model and reasoning-effort combinations from the runtime catalog.  `inherit` allows Codex defaults; `explicit` requires both values before `turn/start`.
+`TaskSupervisor.start_code_task()` creates the durable `QUEUED` task snapshot, submits a job to WorkerQueue, and immediately returns:
 
-`CodexSessionManager` persists thread/turn IDs and uses `thread/resume` after a Bridge restart.  Its public states are `QUEUED`, `PREPARING`, `RUNNING`, `WAITING_REVIEW`, `COMPLETED`, `INTERRUPTED`, and `FAILED`.
+```json
+{
+  "task_id": "task-...",
+  "state": "QUEUED",
+  "project": "registered-project"
+}
+```
 
-## Phase 2
+## Lifecycle and result contract
 
-`TaskSupervisor` owns task lifecycle and does not import or require GitHub.  `TaskEventBus` assigns monotonic sequence numbers and persists safe structured events.  GitHub's existing `Dispatcher` remains a compatibility transport and injects the session manager into code/presentation executors.
+TaskRunner owns the runtime lifecycle and exception conversion:
 
-## Phase 3
+```text
+QUEUED → PREPARING → RUNNING → WAITING_REVIEW
+                         └──────────────→ FAILED
+```
 
-`McpStdioServer` is a newline-delimited JSON-RPC MCP adapter.  It creates no HTTP listener and exposes only the registered Bridge tools documented in [mcp-tools.md](mcp-tools.md).  Tool handlers never accept cwd, absolute paths, arbitrary shell, or arbitrary Python expressions.
+TaskHandler always returns `TaskResult`:
+
+```text
+success: bool
+review_ready: bool
+message: str
+artifacts: list
+metadata: dict
+```
+
+When `success=True` and `review_ready=True`, TaskRunner transitions `RUNNING → WAITING_REVIEW`. When `success=False`, it transitions to `FAILED`. TaskRunner does not read the current snapshot after `handler.execute()` to guess the execution outcome.
+
+TaskHandler adapts task-type-specific work. Executor owns worktree preparation, Codex interaction, and file modification. CodexSessionManager owns the app-server session protocol and durable thread/turn identity; it does not own WorkerQueue scheduling.
+
+## Durable state and events
+
+The TaskStore snapshot is the single business-state source for status consumers. It reads and writes durable files, stores non-state metadata, and stores bounded artifact manifests. A Future being done, cancelled, or exceptional is not a business task state.
+
+`TaskEventBus` (called EventBus here) is the only runtime boundary allowed to change business state. It validates the transition, appends the safe event, assigns the monotonically increasing per-task `event_seq`, and updates the snapshot state/cursor together. Direct business calls such as `TaskStore.update_task(state=...)` are prohibited; TaskStore metadata writes do not replace EventBus transitions.
+
+## Worker scheduling and recovery
+
+WorkerQueue owns only Future submission, cancellation, and shutdown. It does not expose or define `QUEUED`, `RUNNING`, `FAILED`, or `COMPLETED` business statuses.
+
+On restart, persisted `QUEUED` code tasks are re-enqueued. For `PREPARING` or `RUNNING`, recovery first checks whether the registered project, trusted worktree, and persisted session can be safely resumed. If it cannot establish that condition, it records `UNKNOWN`; it does not convert an unverifiable in-flight task directly to `FAILED`.
+
+## Compatibility and exclusions
+
+`experiment-review` and `presentation` remain compatibility interfaces and retain their existing paths. They are not migrated to the V0.2.1 code-task async runtime or its WorkerQueue/TaskRunner lifecycle contract.
+
+WPS, Dashboard, and Web API are explicitly excluded from V0.2.1. `McpStdioServer` remains a newline-delimited JSON-RPC adapter with no HTTP listener. Its registered tools continue to reject arbitrary cwd, absolute paths, shells, and Python expressions; see [mcp-tools.md](mcp-tools.md).

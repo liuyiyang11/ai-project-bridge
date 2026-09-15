@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from bridge.orchestration.event_bus import TaskEventBus
 from bridge.store.task_store import TaskStore, utc_now
 
 
@@ -30,7 +31,7 @@ def test_update_and_transition_task_keep_snapshot_and_legacy_projection_in_sync(
     store.create_task("task-1", project="demo", task_type="code", instruction="wait")
 
     store.update_task("task-1", thread_id="thread-1", stage="starting turn")
-    store.transition_task("task-1", "QUEUED", "PREPARING", "worker accepted task")
+    TaskEventBus(store, "task-1").transition("QUEUED", "PREPARING", "worker accepted task")
 
     assert store.get_task("task-1")["thread_id"] == "thread-1"
     assert store.get_task("task-1")["state"] == "PREPARING"

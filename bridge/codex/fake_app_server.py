@@ -47,6 +47,7 @@ class FakeAppServer:
         self.notification_handler = notification_handler
         self.process_error_handler = process_error_handler
         self.requests: list[tuple[str, dict[str, Any]]] = []
+        self.notifications: list[dict[str, Any]] = []
         self.started = False
         self.closed = False
 
@@ -92,8 +93,10 @@ class FakeAppServer:
         return {}
 
     def emit(self, method: str, params: Optional[dict[str, Any]] = None) -> None:
+        event = {"method": method, "params": params or {}}
+        self.notifications.append(event)
         if self.notification_handler:
-            self.notification_handler({"method": method, "params": params or {}})
+            self.notification_handler(event)
 
     def fail(self, message: str = "fake process failed") -> None:
         error = RuntimeError(message)

@@ -28,18 +28,9 @@ class WorkerQueue:
         with self._lock:
             return self._futures.get(task_id)
 
-    def status(self, task_id: str) -> dict[str, Any]:
+    def cancel(self, task_id: str) -> bool:
         future = self.future(task_id)
-        if future is None:
-            return {"task_id": task_id, "state": "UNKNOWN", "done": False}
-        if future.cancelled():
-            state = "CANCELLED"
-        elif not future.done():
-            state = "RUNNING" if future.running() else "QUEUED"
-        else:
-            state = "FAILED" if future.exception() is not None else "COMPLETED"
-        return {"task_id": task_id, "state": state, "done": future.done(), "cancelled": future.cancelled()}
+        return bool(future and future.cancel())
 
     def shutdown(self, *, wait: bool = True, cancel_futures: bool = False) -> None:
         self._executor.shutdown(wait=wait, cancel_futures=cancel_futures)
-
