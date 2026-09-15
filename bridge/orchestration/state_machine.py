@@ -14,12 +14,14 @@ class TaskStateMachine:
 
     _TRANSITIONS = {
         SessionState.QUEUED: {SessionState.PREPARING, SessionState.FAILED},
-        SessionState.PREPARING: {SessionState.RUNNING, SessionState.FAILED, SessionState.INTERRUPTED},
-        SessionState.RUNNING: {SessionState.WAITING_REVIEW, SessionState.INTERRUPTED, SessionState.FAILED},
+        SessionState.PREPARING: {SessionState.RUNNING, SessionState.FAILED, SessionState.INTERRUPTED, SessionState.UNKNOWN},
+        SessionState.RUNNING: {SessionState.WAITING_REVIEW, SessionState.INTERRUPTED, SessionState.FAILED, SessionState.UNKNOWN},
         SessionState.WAITING_REVIEW: {SessionState.RUNNING, SessionState.COMPLETED},
         SessionState.COMPLETED: set(),
         SessionState.INTERRUPTED: {SessionState.PREPARING, SessionState.FAILED},
         SessionState.FAILED: {SessionState.PREPARING},
+        SessionState.UNKNOWN: {SessionState.RUNNING, SessionState.CANCELLED},
+        SessionState.CANCELLED: set(),
     }
 
     @classmethod

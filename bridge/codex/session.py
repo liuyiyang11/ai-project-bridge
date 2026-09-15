@@ -23,6 +23,8 @@ class SessionState(str, Enum):
     COMPLETED = "COMPLETED"
     INTERRUPTED = "INTERRUPTED"
     FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"
+    CANCELLED = "CANCELLED"
 
 
 @dataclass
@@ -128,18 +130,27 @@ class CodexSessionManager:
                 raise SessionTransitionError(f"task is already active: {task_id}")
             if task_id in self.sessions:
                 self._close_client(task_id)
+            stored_state = SessionState.QUEUED
+            if self.store and self.store.exists(task_id):
+                try:
+                    stored_value = self.store.get_task(task_id).get("state", SessionState.QUEUED.value)
+                    stored_state = SessionState(stored_value)
+                except (ValueError, TypeError):
+                    stored_state = SessionState.QUEUED
             record = SessionRecord(
                 task_id=task_id,
                 project=project,
                 worktree=worktree,
-                state=SessionState.PREPARING,
-                current_action="starting app-server",
+                state=stored_state,
+                current_action="queued" if stored_state == SessionState.QUEUED else "starting app-server",
                 model=model,
                 reasoning_effort=reasoning_effort,
                 events_path=Path(events_path).resolve() if events_path else None,
             )
             self.sessions[task_id] = record
             self._persist(record)
+            if record.state == SessionState.QUEUED:
+                self._set_state(record, SessionState.PREPARING, "starting app-server")
         try:
             client = self._new_client(record)
             if getattr(client, "notification_handler", None) is None:
@@ -460,8 +471,6 @@ class CodexSessionManager:
             return
         self.store.update_state(
             record.task_id,
-            state=record.state.value,
-            status=record.state.value,
             stage=record.current_action,
             current_action=record.current_action,
             thread_id=record.thread_id,
@@ -479,13 +488,20 @@ class CodexSessionManager:
         record.state = state
         record.current_action = action
         if old != state:
-            self._emit_event(record, "state_changed", {"from": old.value, "to": state.value, "action": action})
+            bus = self._bus(record)
+            if bus is not None:
+                emitted = bus.transition(old.value, state.value, action)
+                if isinstance(emitted, dict):
+                    record.event_seq = int(emitted.get("seq", record.event_seq))
         self._persist(record)
 
     def _fail(self, record: SessionRecord, error: Exception) -> None:
         record.last_error = f"{type(error).__name__}: {error}"
-        record.current_action = "failed"
-        record.state = SessionState.FAILED
+        if record.state != SessionState.FAILED:
+            self._set_state(record, SessionState.FAILED, "failed")
+        else:
+            record.current_action = "failed"
+            self._persist(record)
         record.completion.set()
         self._emit_event(record, "error", {"message": record.last_error})
         self._persist(record)

@@ -3,7 +3,8 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable, Optional
 
-from ..task_store import TaskStore, utc_now
+from ..store.task_store import TaskStore, utc_now
+from .state_machine import InvalidTaskTransition, TaskStateMachine
 
 
 class TaskEventBus:
@@ -29,17 +30,43 @@ class TaskEventBus:
             raise ValueError("event type must be non-empty")
         event_task_id = task_id or self.task_id
         with self._lock:
-            state = self.store.load_state(event_task_id)
-            seq = int(state.get("event_seq", 0)) + 1
-            event = {
-                "seq": seq,
-                "type": event_type,
-                "task_id": event_task_id,
-                "timestamp": utc_now(),
-                "data": self._sanitize(data or {}),
-            }
-            self.store.append_event(event_task_id, event)
-            self.store.update_state(event_task_id, event_seq=seq, last_event_seq=seq)
+            event = self._append_event_locked(event_task_id, event_type, data or {})
+            subscribers = list(self._subscribers)
+        for callback in subscribers:
+            try:
+                callback(dict(event))
+            except Exception:
+                continue
+        return event
+
+    def transition(
+        self,
+        from_state: Optional[str],
+        to_state: str,
+        reason: str,
+        *,
+        task_id: Optional[str] = None,
+        updates: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Validate and persist one task state transition plus its event."""
+        event_task_id = task_id or self.task_id
+        with self._lock:
+            current = self.store.get_task(event_task_id).get("state")
+            if from_state is None:
+                if current != to_state:
+                    raise InvalidTaskTransition(f"invalid task transition: {current} -> {to_state}")
+            else:
+                if current != from_state:
+                    raise InvalidTaskTransition(f"invalid task transition: {current} -> {to_state}; found {current}")
+                TaskStateMachine.require(from_state, to_state)
+                self.store.transition_task(event_task_id, from_state, to_state, reason)
+            event = self._append_event_locked(
+                event_task_id,
+                "state_changed",
+                {"from": from_state, "to": to_state, "reason": reason, **(updates or {})},
+            )
+            if updates:
+                self.store.update_task(event_task_id, **updates)
             subscribers = list(self._subscribers)
         for callback in subscribers:
             try:
@@ -49,7 +76,21 @@ class TaskEventBus:
         return event
 
     def events(self, *, after_seq: int = 0, limit: int = 100) -> list[dict[str, Any]]:
-        return self.store.read_events(self.task_id, after_seq=after_seq, limit=limit)
+        return self.store.list_events(self.task_id, after_seq=after_seq, limit=limit)
+
+    def _append_event_locked(self, task_id: str, event_type: str, data: dict[str, Any]) -> dict[str, Any]:
+        state = self.store.get_task(task_id)
+        seq = int(state.get("last_event_seq", state.get("event_seq", 0))) + 1
+        event = {
+            "seq": seq,
+            "task_id": task_id,
+            "type": event_type,
+            "time": utc_now(),
+            "data": self._sanitize(data),
+        }
+        self.store.append_event(task_id, event)
+        self.store.update_task(task_id, event_seq=seq, last_event_seq=seq)
+        return event
 
     @classmethod
     def _sanitize(cls, value: Any, depth: int = 0) -> Any:
