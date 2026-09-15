@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from bridge.config import load_config
 from bridge.dispatcher import Dispatcher
 from bridge.github import Issue, IssueComment
+from bridge.orchestration.models import TaskResult
+from bridge.orchestration.supervisor import TaskSupervisor
+from bridge.orchestration.worker import WorkerQueue
 from bridge.task_store import TaskStore
 
 
@@ -66,6 +69,20 @@ class FakeExecutor:
         }
 
 
+class FakeRuntimeExecutor:
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, task):
+        self.calls.append(dict(task))
+        return TaskResult(
+            success=True,
+            review_ready=True,
+            message="shared runtime completed",
+            metadata={"thread_id": "runtime-thread", "changed_files": []},
+        )
+
+
 def write_config(path, root):
     path.write_text(
         f"""control_repo: owner/bridge
@@ -100,6 +117,66 @@ def test_dispatcher_transitions_ready_to_review_and_skips_duplicate(tmp_path):
     manifest = json.loads((config.state_root / "tasks" / "1" / "review_bundle" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["issue_number"] == 1
     assert manifest["pr_url"].endswith("/pull/1")
+
+
+def test_github_code_task_uses_supervisor_task_runner_runtime(tmp_path):
+    config_path = tmp_path / "config.local.yaml"
+    write_config(config_path, tmp_path / "demo")
+    config = load_config(config_path)
+    fake_github = FakeGitHub([Issue(10, "Demo", TASK_BODY, "https://github/issues/10", {"ai-task", "task:code", "status:ready"}, author_login="trusted-user")])
+    runtime_executor = FakeRuntimeExecutor()
+    store = TaskStore(config.state_root)
+    supervisor = TaskSupervisor(
+        config,
+        store=store,
+        worker_queue=WorkerQueue(max_workers=1),
+        code_executor=runtime_executor,
+    )
+    try:
+        dispatcher = Dispatcher(config, fake_github, store=store, supervisor=supervisor)
+        outcome = dispatcher.run_once()
+    finally:
+        supervisor.close()
+
+    assert outcome[0]["status"] == "review"
+    assert len(runtime_executor.calls) == 1
+    assert runtime_executor.calls[0]["task_type"] == "code"
+    assert store.get_task("10")["state"] == "WAITING_REVIEW"
+    assert fake_github.statuses == [(10, "running"), (10, "review")]
+
+
+def test_github_code_rework_reuses_the_shared_runtime(tmp_path):
+    config_path = tmp_path / "config.local.yaml"
+    write_config(config_path, tmp_path / "demo")
+    config = load_config(config_path)
+    initial = Issue(11, "Demo", TASK_BODY, "https://github/issues/11", {"ai-task", "task:code", "status:ready"}, author_login="trusted-user")
+    fake_github = FakeGitHub([initial])
+    runtime_executor = FakeRuntimeExecutor()
+    store = TaskStore(config.state_root)
+    supervisor = TaskSupervisor(config, store=store, worker_queue=WorkerQueue(max_workers=1), code_executor=runtime_executor)
+    try:
+        dispatcher = Dispatcher(config, fake_github, store=store, supervisor=supervisor)
+        dispatcher.run_once()
+        rework = Issue(
+            11,
+            "Demo",
+            TASK_BODY,
+            initial.url,
+            {"ai-task", "task:code", "status:review"},
+            [IssueComment("c-runtime", "<!-- AI_BRIDGE_REWORK -->\n```yaml\ninstruction: Fix it.\n```", author_login="trusted-user")],
+            author_login="trusted-user",
+        )
+        fake_github.issues = [rework]
+        fake_github.views[11] = rework
+        outcome = dispatcher.run_once()
+    finally:
+        supervisor.close()
+
+    assert outcome[0]["status"] == "review"
+    assert len(runtime_executor.calls) == 2
+    assert runtime_executor.calls[1]["rework_instruction"] == "Fix it."
+    assert store.get_task("11")["state"] == "WAITING_REVIEW"
+    assert store.get_task("11")["processed_rework_comment_ids"] == ["c-runtime"]
 
 
 def test_dispatcher_marks_unregistered_project_failed(tmp_path):

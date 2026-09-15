@@ -20,14 +20,25 @@ def _value(result: Any, name: str, default: Any = None) -> Any:
 
 
 class CodeExecutor:
-    def __init__(self, runner: Any = None, manager_factory: Optional[Callable[[ProjectConfig, Path], WorktreeManager]] = None, *, publish: bool = True, session_manager: Any = None):
+    def __init__(self, runner: Any = None, manager_factory: Optional[Callable[[ProjectConfig, Path], WorktreeManager]] = None, *, publish: bool = True, session_manager: Any = None, manage_task_lifecycle: bool = True):
         self.runner = runner
         self.manager_factory = manager_factory
         self.publish = publish
         self.session_manager = session_manager
+        self.manage_task_lifecycle = bool(manage_task_lifecycle)
 
-    def execute(self, context: ExecutionContext, rework_instruction: Optional[str] = None) -> dict:
-        return self._execute_codex(context, self._prompt(context, rework_instruction), rework_instruction)
+    def execute(
+        self,
+        context: ExecutionContext,
+        rework_instruction: Optional[str] = None,
+        resume_thread_id: Optional[str] = None,
+    ) -> dict:
+        return self._execute_codex(
+            context,
+            self._prompt(context, rework_instruction),
+            rework_instruction,
+            resume_thread_id=resume_thread_id,
+        )
 
     def _prompt(self, context: ExecutionContext, rework_instruction: Optional[str]) -> str:
         task = context.task
@@ -57,14 +68,23 @@ class CodeExecutor:
         """Hook for task types that must prepare files before the branch is committed."""
         return {}
 
-    def _execute_codex(self, context: ExecutionContext, prompt: str, rework_instruction: Optional[str]) -> dict:
+    def _execute_codex(
+        self,
+        context: ExecutionContext,
+        prompt: str,
+        rework_instruction: Optional[str],
+        *,
+        resume_thread_id: Optional[str] = None,
+    ) -> dict:
         manager = self._manager(context)
         info = manager.prepare(context.task.project, context.issue.number)
         context.store.update_state(context.issue.number, worktree_path=str(info.path), branch=info.branch, base_branch=info.base_branch, base_head=info.base_head)
         session_manager = self.session_manager or getattr(context, "session_manager", None)
         runner = self.runner or context.runner
         state = context.store.load_state(context.issue.number)
-        requested_thread_id = state.get("thread_id") if rework_instruction and state.get("thread_id") else None
+        requested_thread_id = resume_thread_id or (state.get("thread_id") if rework_instruction and state.get("thread_id") else None)
+        if requested_thread_id is not None and (not isinstance(requested_thread_id, str) or not requested_thread_id):
+            raise RuntimeError("Codex resume thread id must be a non-empty string")
         run_kind = "rework" if requested_thread_id else "initial"
         run_record = context.store.begin_run(context.issue.number, run_kind, requested_thread_id=requested_thread_id)
         events_path = context.store.task_dir(context.issue.number) / run_record["events_path"]
@@ -79,6 +99,7 @@ class CodeExecutor:
                     reasoning_effort=getattr(context.task, "reasoning_effort", None),
                     resume_thread_id=requested_thread_id,
                     events_path=events_path,
+                    manage_task_lifecycle=self.manage_task_lifecycle,
                 )
             elif requested_thread_id:
                 result = runner.resume_task(requested_thread_id, prompt, info.path, events_path)
@@ -179,7 +200,7 @@ class RuntimeCodeExecutor:
     def execute(self, task: dict[str, Any]) -> "TaskResult":
         task_id = str(task["task_id"])
         project_name = str(task["project"])
-        instruction = str(task.get("instruction", ""))
+        instruction = str(task.get("rework_instruction") or task.get("instruction", ""))
         if self.store.get_task(task_id).get("state") == "INTERRUPTED":
             from ..orchestration.models import TaskResult
 
@@ -216,7 +237,8 @@ class RuntimeCodeExecutor:
             base_branch=_value(worktree_info, "base_branch"),
             base_head=_value(worktree_info, "base_head"),
         )
-        run = self.store.begin_run(task_id, "initial")
+        run_kind = "rework" if isinstance(resume_thread_id, str) and task.get("rework_instruction") else "initial"
+        run = self.store.begin_run(task_id, run_kind, requested_thread_id=resume_thread_id if run_kind == "rework" else None)
         events_path = self.store.task_dir(task_id) / run["events_path"]
         try:
             record = self.session_manager.start_task(

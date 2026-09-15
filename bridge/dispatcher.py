@@ -6,10 +6,12 @@ from typing import Any, Optional
 
 from .config import BridgeConfig, ConfigError
 from .executors import ExecutionContext
-from .executors.code import CodeExecutor
 from .executors.experiment_review import ExperimentReviewExecutor
+from .executors.github_code import GitHubCodeTaskExecutor
 from .executors.presentation import PresentationExecutor
 from .github import GhClient, Issue
+from .orchestration.models import TaskResult
+from .orchestration.supervisor import TaskSupervisor
 from .task_parser import TaskParseError, parse_rework_comment, parse_task_body
 from .task_store import TaskStore, utc_now
 
@@ -19,14 +21,41 @@ ACTIVE_STATUSES = {"running", "review", "approved"}
 
 
 class Dispatcher:
-    def __init__(self, config: BridgeConfig, github: Any, *, store: Optional[TaskStore] = None, runner: Any = None, session_manager: Any = None, executors: Optional[dict[str, Any]] = None):
+    def __init__(
+        self,
+        config: BridgeConfig,
+        github: Any,
+        *,
+        store: Optional[TaskStore] = None,
+        runner: Any = None,
+        session_manager: Any = None,
+        executors: Optional[dict[str, Any]] = None,
+        supervisor: Optional[TaskSupervisor] = None,
+    ):
         self.config = config
         self.github: Any = github
         self.store = store or TaskStore(config.state_root)
         self.runner = runner
         self.session_manager = session_manager
-        self.executors = executors or {
-            "code": CodeExecutor(runner=runner, session_manager=session_manager),
+        # A caller that supplies legacy executors explicitly keeps the mature
+        # compatibility path used by presentation/experiment tests.  The
+        # normal GitHub construction uses the same Supervisor/TaskRunner core
+        # as MCP for code tasks.
+        if supervisor is None and executors is None:
+            supervisor = TaskSupervisor(
+                config,
+                store=self.store,
+                session_manager=session_manager,
+                code_executor=GitHubCodeTaskExecutor(
+                    config,
+                    self.store,
+                    github,
+                    runner=runner,
+                    session_manager=session_manager,
+                ),
+            )
+        self.supervisor = supervisor
+        self.executors = executors if executors is not None else {
             "presentation": PresentationExecutor(runner=runner, session_manager=session_manager),
             "experiment-review": ExperimentReviewExecutor(),
         }
@@ -55,7 +84,12 @@ class Dispatcher:
     def _process_new(self, issue: Issue) -> Optional[dict]:
         if self.store.exists(issue.number):
             state = self.store.load_state(issue.number)
-            if state.get("status") in ACTIVE_STATUSES or state.get("status") == "failed":
+            runtime_state = state.get("state")
+            if (
+                state.get("status") in ACTIVE_STATUSES
+                or state.get("status") == "failed"
+                or runtime_state in {"QUEUED", "PREPARING", "RUNNING", "WAITING_REVIEW", "COMPLETED", "INTERRUPTED", "CANCELLED"}
+            ):
                 return None
         try:
             task = parse_task_body(issue.body)
@@ -69,6 +103,8 @@ class Dispatcher:
                 return None
         except Exception:
             raise
+        if self.supervisor is not None and task.task_type == "code":
+            return self._process_new_code_runtime(issue, task)
         if not self.store.exists(issue.number):
             self.store.initialize(
                 issue.number,
@@ -88,11 +124,40 @@ class Dispatcher:
         self.github.comment(issue.number, "Bridge accepted this task and started local execution.")
         return self._execute(issue, task, project, rework_instruction=None)
 
+    def _process_new_code_runtime(self, issue: Issue, task: Any) -> dict:
+        """Submit a GitHub code task to the shared async runtime."""
+        self.github.set_status(issue.number, "running")
+        self.github.comment(issue.number, "Bridge accepted this task and started local execution.")
+        try:
+            self.supervisor.start_code_task(
+                task.project,
+                task.instructions or task.goal or task.title,
+                task.acceptance,
+                model=task.model,
+                reasoning_effort=task.reasoning_effort,
+                task_id=str(issue.number),
+                metadata={
+                    "github_issue_number": issue.number,
+                    "github_issue_title": issue.title,
+                    "github_issue_body": issue.body,
+                    "github_issue_url": issue.url,
+                    "github_author_login": issue.author_login,
+                },
+            )
+            result = self.supervisor.wait_for_task(str(issue.number))
+            if not isinstance(result, TaskResult) or not result.success:
+                raise RuntimeError(result.message if isinstance(result, TaskResult) else "shared code runtime returned no successful result")
+            return self._finalize_runtime_result(issue, task, result)
+        except Exception as exc:
+            return self._record_runtime_failure(issue, exc)
+
     def _process_rework(self, issue: Issue) -> Optional[dict]:
         if not self.store.exists(issue.number):
             return None
         state = self.store.load_state(issue.number)
-        if state.get("status") != "review":
+        runtime_code = self.supervisor is not None and state.get("task_type", "code") == "code"
+        review_state = state.get("state") == "WAITING_REVIEW" if runtime_code else state.get("status") == "review"
+        if not review_state:
             return None
         if not self.config.is_trusted_github_login(issue.author_login or state.get("author_login")):
             return None
@@ -102,22 +167,78 @@ class Dispatcher:
                 continue
             if not self.config.is_trusted_github_login(comment.author_login):
                 continue
-            if not self.store.claim_rework_comment(issue.number, comment.id):
+            if runtime_code:
+                if comment.id in list(state.get("processed_rework_comment_ids", [])):
+                    continue
+            elif not self.store.claim_rework_comment(issue.number, comment.id):
                 continue
             try:
                 instruction = parse_rework_comment(comment.body)
-                task = parse_task_body(self.store.task_path(issue.number, "task.yaml").read_text(encoding="utf-8"))
+                task_body = state.get("github_issue_body") if runtime_code else None
+                if not isinstance(task_body, str) or not task_body.strip():
+                    task_body = self.store.task_path(issue.number, "task.yaml").read_text(encoding="utf-8")
+                task = parse_task_body(task_body)
                 project = self.config.project(task.project)
                 if task.task_type not in project.capabilities:
                     raise ConfigError(f"project {task.project!r} does not support task type {task.task_type!r}")
                 if task.task_type not in {"code", "presentation"}:
                     raise RuntimeError("only code and presentation tasks support Codex rework in V0.1")
+                if runtime_code and task.task_type == "code":
+                    self.github.set_status(issue.number, "running")
+                    self.github.comment(issue.number, f"Bridge accepted rework comment {comment.id} and resumed the local task.")
+                    self.supervisor.queue_code_rework(str(issue.number), instruction, comment_id=comment.id)
+                    result = self.supervisor.wait_for_task(str(issue.number))
+                    if not isinstance(result, TaskResult) or not result.success:
+                        raise RuntimeError(result.message if isinstance(result, TaskResult) else "shared code runtime returned no successful rework result")
+                    return self._finalize_runtime_result(issue, task, result)
                 self.github.set_status(issue.number, "running")
                 self.github.comment(issue.number, f"Bridge accepted rework comment {comment.id} and resumed the local task.")
                 return self._execute(issue, task, project, rework_instruction=instruction)
             except Exception as exc:
-                return self._record_failure(issue, exc, preserve_review=False)
+                return self._record_runtime_failure(issue, exc) if runtime_code else self._record_failure(issue, exc, preserve_review=False)
         return None
+
+    def _finalize_runtime_result(self, issue: Issue, task: Any, result: TaskResult) -> dict:
+        payload = result.metadata.get("github_result") if isinstance(result.metadata, dict) else None
+        output = dict(payload) if isinstance(payload, dict) else {
+            "thread_id": result.metadata.get("thread_id") if isinstance(result.metadata, dict) else None,
+            "final_message": result.message,
+            "changed_files": result.metadata.get("changed_files", []) if isinstance(result.metadata, dict) else [],
+            "artifact_list": result.artifacts,
+        }
+        output["status"] = "review"
+        self._write_bundle(issue, task, output)
+        self.store.write_result(issue.number, output)
+        self.store.update_state(
+            issue.number,
+            finished_at=utc_now(),
+            thread_id=output.get("thread_id"),
+            pr_url=output.get("pr_url"),
+            last_error=None,
+        )
+        self.github.set_status(issue.number, "review")
+        summary = str(output.get("final_message") or "Task completed; review bundle is ready.").strip().replace("\n", " ")[:500]
+        self.github.comment(issue.number, f"Bridge completed the task and prepared review artifacts. {summary}")
+        return {"issue_number": issue.number, "status": "review", **output}
+
+    def _record_runtime_failure(self, issue: Issue, error: Exception) -> dict:
+        """Publish a runtime failure without rewriting its uppercase lifecycle."""
+        message = f"{type(error).__name__}: {error}"
+        if not self.store.exists(issue.number):
+            self.store.initialize(issue.number, issue.body, {"status": "failed", "issue_url": issue.url})
+        self.store.update_task(issue.number, finished_at=utc_now(), last_error=message)
+        failure_result = {"status": "failed", "error": message}
+        state = self.store.load_state(issue.number)
+        if state.get("runs"):
+            failure_result["runs"] = state["runs"]
+            failure_result["run"] = state["runs"][-1]
+        self.store.write_result(issue.number, failure_result)
+        try:
+            self.github.set_status(issue.number, "failed")
+            self.github.comment(issue.number, f"Bridge rejected or failed this task: {message[:700]}")
+        except Exception:
+            pass
+        return {"issue_number": issue.number, "status": "failed", "error": message}
 
     def _execute(self, issue: Issue, task: Any, project: Any, rework_instruction: Optional[str]) -> dict:
         executor = self.executors[task.task_type]

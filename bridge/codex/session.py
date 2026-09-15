@@ -48,6 +48,7 @@ class SessionRecord:
     events_path: Optional[Path] = None
     completion: threading.Event = field(default_factory=threading.Event, repr=False)
     message_parts: list[str] = field(default_factory=list, repr=False)
+    interrupt_requested: bool = field(default=False, repr=False)
 
     @property
     def turn_id(self) -> Optional[str]:
@@ -269,11 +270,20 @@ class CodexSessionManager:
 
     def interrupt_task(self, task_id: str) -> SessionRecord:
         record = self._get(task_id)
-        self._require_state(record, {SessionState.RUNNING}, "interrupt")
-        self._take_over_lifecycle_for_control(record)
-        self._clients[task_id].turn_interrupt(record.thread_id or "", record.active_turn_id or "")
-        self._set_state(record, SessionState.INTERRUPTED, "interrupted")
-        record.completion.set()
+        with self._lock:
+            self._require_state(record, {SessionState.RUNNING}, "interrupt")
+            self._take_over_lifecycle_for_control(record)
+            # Mark the local terminal intent and persist the terminal state
+            # before asking app-server to interrupt.  The server may emit the
+            # turn/completed notification synchronously while that request is
+            # in flight, so interrupt must win the race by construction.
+            record.interrupt_requested = True
+            self._set_state(record, SessionState.INTERRUPTED, "interrupted")
+            record.completion.set()
+            client = self._clients[task_id]
+            thread_id = record.thread_id or ""
+            turn_id = record.active_turn_id or ""
+        client.turn_interrupt(thread_id, turn_id)
         return record
 
     def accept_task(self, task_id: str) -> SessionRecord:
@@ -421,54 +431,60 @@ class CodexSessionManager:
         return CodexAppServerClient(binary, cwd=cwd)
 
     def _on_event(self, task_id: str, event: dict[str, Any]) -> None:
-        record = self.sessions.get(task_id)
-        if record is None:
-            return
-        if record.events_path:
-            record.events_path.parent.mkdir(parents=True, exist_ok=True)
-            with record.events_path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps(event, ensure_ascii=False) + "\n")
-        method = event.get("method")
-        params = event.get("params") if isinstance(event.get("params"), dict) else {}
-        if method == "thread/started":
-            thread_id = self._thread_id(params)
-            if thread_id and record.thread_id is None:
-                record.thread_id = thread_id
-        elif method == "turn/started":
-            record.active_turn_id = self._turn_id(params)
-            record.current_action = "running turn"
-        elif method == "item/agentMessage/delta":
-            delta = params.get("delta")
-            if isinstance(delta, str):
-                record.message_parts.append(delta[:16000])
-                record.final_message = "".join(record.message_parts)[-50000:]
-        elif method == "turn/completed":
-            turn = params.get("turn") if isinstance(params.get("turn"), dict) else params
-            record.active_turn_id = self._turn_id(turn) or record.active_turn_id
-            status = turn.get("status")
-            if not record.final_message:
-                record.final_message = self._message_from_turn(turn)
-            if status == "completed" or status is None:
-                self._set_state(record, SessionState.WAITING_REVIEW, "review ready")
-            elif status == "interrupted":
-                self._set_state(record, SessionState.INTERRUPTED, "interrupted")
-            else:
-                self._fail(record, RuntimeError(self._turn_error(turn) or "Codex turn failed"))
-            record.completion.set()
-        elif method == "error":
-            message = params.get("error") if isinstance(params.get("error"), dict) else params
-            self._fail(record, RuntimeError(self._turn_error(message) or str(message)))
-        elif method == "warning":
-            record.current_action = str(params.get("message") or "warning")[:1000]
-        elif method == "thread/status/changed":
-            record.current_action = "thread status changed"
-        elif method in {"turn/diff/updated", "item/fileChange/outputDelta", "item/fileChange/patchUpdated"}:
-            record.current_action = "files changed"
-            record.changed_files.extend(path for path in self._changed_paths(params) if path not in record.changed_files)
-        elif method == "item/commandExecution/outputDelta":
-            record.current_action = "command output"
-        self._emit_event(record, method or "notification", params)
-        self._persist(record)
+        with self._lock:
+            record = self.sessions.get(task_id)
+            if record is None:
+                return
+            if record.events_path:
+                record.events_path.parent.mkdir(parents=True, exist_ok=True)
+                with record.events_path.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+            method = event.get("method")
+            params = event.get("params") if isinstance(event.get("params"), dict) else {}
+            # INTERRUPTED/CANCELLED is a terminal boundary for every late
+            # app-server notification.  In particular, a completion from the
+            # old turn must not mutate memory, durable state, or review_ready.
+            if record.interrupt_requested or record.state in {SessionState.INTERRUPTED, SessionState.CANCELLED}:
+                return
+            if method == "thread/started":
+                thread_id = self._thread_id(params)
+                if thread_id and record.thread_id is None:
+                    record.thread_id = thread_id
+            elif method == "turn/started":
+                record.active_turn_id = self._turn_id(params)
+                record.current_action = "running turn"
+            elif method == "item/agentMessage/delta":
+                delta = params.get("delta")
+                if isinstance(delta, str):
+                    record.message_parts.append(delta[:16000])
+                    record.final_message = "".join(record.message_parts)[-50000:]
+            elif method in {"turn/completed", "turn/finished"}:
+                turn = params.get("turn") if isinstance(params.get("turn"), dict) else params
+                record.active_turn_id = self._turn_id(turn) or record.active_turn_id
+                status = turn.get("status")
+                if not record.final_message:
+                    record.final_message = self._message_from_turn(turn)
+                if status == "completed" or status is None:
+                    self._set_state(record, SessionState.WAITING_REVIEW, "review ready")
+                elif status == "interrupted":
+                    self._set_state(record, SessionState.INTERRUPTED, "interrupted")
+                else:
+                    self._fail(record, RuntimeError(self._turn_error(turn) or "Codex turn failed"))
+                record.completion.set()
+            elif method == "error":
+                message = params.get("error") if isinstance(params.get("error"), dict) else params
+                self._fail(record, RuntimeError(self._turn_error(message) or str(message)))
+            elif method == "warning":
+                record.current_action = str(params.get("message") or "warning")[:1000]
+            elif method == "thread/status/changed":
+                record.current_action = "thread status changed"
+            elif method in {"turn/diff/updated", "item/fileChange/outputDelta", "item/fileChange/patchUpdated"}:
+                record.current_action = "files changed"
+                record.changed_files.extend(path for path in self._changed_paths(params) if path not in record.changed_files)
+            elif method == "item/commandExecution/outputDelta":
+                record.current_action = "command output"
+            self._emit_event(record, method or "notification", params)
+            self._persist(record)
 
     def _on_process_error(self, task_id: str, error: Exception) -> None:
         record = self.sessions.get(task_id)
@@ -551,21 +567,32 @@ class CodexSessionManager:
         record.manage_task_lifecycle = True
 
     def _set_state(self, record: SessionRecord, state: SessionState, action: str) -> None:
-        old = record.state
-        record.state = state
-        record.current_action = action
-        if old != state and record.manage_task_lifecycle:
-            bus = self._bus(record)
-            if bus is not None:
-                emitted = bus.transition(
-                    old.value,
-                    state.value,
-                    action,
-                    updates={"review_ready": state == SessionState.WAITING_REVIEW},
-                )
-                if isinstance(emitted, dict):
-                    record.event_seq = int(emitted.get("seq", record.event_seq))
-        self._persist(record)
+        with self._lock:
+            old = record.state
+            emitted = None
+            # Validate and persist the durable transition before mutating the
+            # in-memory record.  If EventBus rejects the transition, the
+            # SessionRecord remains a faithful view of the previous state.
+            if old != state:
+                # Keep the import local: the state-machine module imports the
+                # SessionState enum from this module.
+                from ..orchestration.state_machine import TaskStateMachine
+
+                TaskStateMachine.require(old, state)
+                if record.manage_task_lifecycle:
+                    bus = self._bus(record)
+                    if bus is not None:
+                        emitted = bus.transition(
+                            old.value,
+                            state.value,
+                            action,
+                            updates={"review_ready": state == SessionState.WAITING_REVIEW},
+                        )
+            record.state = state
+            record.current_action = action
+            if isinstance(emitted, dict):
+                record.event_seq = int(emitted.get("seq", record.event_seq))
+            self._persist(record)
 
     def _fail(self, record: SessionRecord, error: Exception) -> None:
         record.last_error = f"{type(error).__name__}: {error}"

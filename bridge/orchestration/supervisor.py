@@ -108,6 +108,7 @@ class TaskSupervisor:
         reasoning_effort: Optional[str] = None,
         task_id: Optional[str] = None,
         worktree: Optional[Path] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         request = TaskRequest(
             task_type="code",
@@ -117,8 +118,52 @@ class TaskSupervisor:
             model=model,
             reasoning_effort=reasoning_effort,
             task_id=task_id,
+            metadata=metadata,
         )
         return self._enqueue_code_task(request, worktree=worktree)
+
+    def wait_for_task(self, task_id: str, *, timeout: Optional[float] = None) -> Any:
+        """Wait for a submitted worker job while keeping state durable."""
+        future = self.worker_queue.future(task_id)
+        if future is None:
+            raise ValueError(f"task has no worker job: {task_id}")
+        return future.result(timeout=timeout)
+
+    def queue_code_rework(self, task_id: str, instruction: str, *, comment_id: Optional[str] = None) -> dict[str, Any]:
+        """Queue a code rework turn through the same TaskRunner runtime."""
+        if not isinstance(instruction, str) or not instruction.strip():
+            raise ValueError("rework instruction must be non-empty")
+        task_id = str(task_id)
+        with self.store.task_lock(task_id):
+            task = self._stored_state(task_id)
+            if task.get("task_type", "code") != "code":
+                raise ValueError("only code tasks support runtime rework")
+            current = str(task.get("state", task.get("status", "")))
+            if current != SessionState.WAITING_REVIEW.value:
+                raise SessionTransitionError(f"code rework requires WAITING_REVIEW, found {current}")
+            processed = list(task.get("processed_rework_comment_ids", []))
+            if comment_id is not None:
+                if comment_id in processed:
+                    return self.status(task_id)
+                processed.append(comment_id)
+            updates: dict[str, Any] = {
+                "rework_instruction": instruction.strip(),
+                "resume_thread_id": task.get("thread_id"),
+            }
+            if comment_id is not None:
+                updates["processed_rework_comment_ids"] = processed
+            self.store.update_task(task_id, **updates)
+            self._bus(task_id).transition(
+                SessionState.WAITING_REVIEW.value,
+                SessionState.RUNNING.value,
+                "rework requested",
+            )
+            try:
+                self.worker_queue.submit(task_id, self.task_runner.run, task_id, continuation=True)
+            except Exception as exc:
+                self._fail_task(task_id, exc)
+                raise
+        return self.status(task_id)
 
     def start_presentation_task(
         self,
@@ -421,6 +466,7 @@ class TaskSupervisor:
             acceptance=request.acceptance,
             model=request.model,
             reasoning_effort=request.reasoning_effort,
+            **dict(request.metadata or {}),
         )
         bus = self._bus(task_id)
         bus.emit("task_created", {"project": request.project, "task_type": request.task_type})

@@ -7,11 +7,12 @@ from .base import BaseTransport
 
 
 class GitHubTransport(BaseTransport):
-    """Compatibility adapter for the existing GitHub Issue dispatcher.
+    """Compatibility adapter for the GitHub Issue transport.
 
-    Phase 6 will move Issue parsing and publication behind this adapter.  For
-    Phase 1–3 the mature Dispatcher remains the implementation while the core
-    Supervisor and MCP path stay GitHub-independent.
+    The Dispatcher keeps Issue parsing, trust checks, and GitHub publication;
+    code tasks delegate their lifecycle to the shared Supervisor runtime.
+    Presentation and experiment-review retain their mature compatibility
+    paths for this release.
     """
 
     def __init__(self, dispatcher: Dispatcher):

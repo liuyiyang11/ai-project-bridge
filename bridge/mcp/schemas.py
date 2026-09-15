@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, List, Literal, Optional
 
-from pydantic import BaseModel, Field, StrictInt, StrictStr, validator
+from pydantic import BaseModel, Field, StrictStr, conint, validator
 
 from ..security import SecurityError, ensure_safe_relative_path
 
@@ -72,8 +72,8 @@ class TaskStatusInput(StrictModel):
 
 class TaskEventsInput(StrictModel):
     task_id: StrictStr = Field(min_length=1, max_length=128)
-    after_seq: StrictInt = Field(default=0, ge=0)
-    limit: StrictInt = Field(default=100, ge=1, le=1000)
+    after_seq: conint(strict=True, ge=0) = 0
+    limit: conint(strict=True, ge=1, le=1000) = 100
 
     _safe_id = validator("task_id", allow_reuse=True)(_safe_task_id)
 
@@ -89,6 +89,6 @@ class TaskControlInput(StrictModel):
 class TaskArtifactsInput(StrictModel):
     task_id: StrictStr = Field(min_length=1, max_length=128)
     kind: Optional[StrictStr] = Field(default=None, max_length=100)
-    limit: StrictInt = Field(default=100, ge=1, le=1000)
+    limit: conint(strict=True, ge=1, le=1000) = 100
 
     _safe_id = validator("task_id", allow_reuse=True)(_safe_task_id)

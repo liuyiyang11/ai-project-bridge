@@ -21,6 +21,10 @@ class TaskRequest:
     assets_dir: Optional[str] = None
     template: Optional[str] = None
     renderer: str = "auto"
+    # Private, already-validated transport context.  It is persisted with the
+    # task so a worker/recovery pass can reconstruct the transport adapter
+    # without making the transport own task lifecycle state.
+    metadata: Optional[dict[str, Any]] = None
 
 
 class TaskRouter:

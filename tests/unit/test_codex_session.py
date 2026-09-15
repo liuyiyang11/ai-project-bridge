@@ -7,6 +7,7 @@ import pytest
 from bridge.codex.fake_app_server import FakeCodexAppServer
 from bridge.codex.session import CodexSessionManager, SessionState, SessionTransitionError
 from bridge.orchestration.event_bus import TaskEventBus
+from bridge.orchestration.state_machine import InvalidTaskTransition
 from bridge.store.task_store import TaskStore
 
 
@@ -145,6 +146,35 @@ def test_session_steer_and_interrupt_use_active_turn(tmp_path):
     assert any(name == "turn/steer" for name, _ in fake.requests)
     assert any(name == "turn/interrupt" for name, _ in fake.requests)
     assert manager.status("task-1")["state"] == SessionState.INTERRUPTED.value
+
+
+def test_late_turn_completion_cannot_overwrite_interrupt(tmp_path):
+    store = TaskStore(tmp_path / ".bridge")
+    store.create_task("task-1", project="demo", task_type="code", instruction="wait")
+    fake = FakeCodexAppServer(auto_complete=False)
+    manager = CodexSessionManager(_config(), store=store, client_factory=lambda **kwargs: _attach(fake, kwargs))
+
+    record = manager.start_task("task-1", "demo", tmp_path, "wait")
+    manager.interrupt_task("task-1")
+
+    with pytest.raises(InvalidTaskTransition):
+        manager._set_state(record, SessionState.WAITING_REVIEW, "late review")
+    assert record.state == SessionState.INTERRUPTED
+
+    # This is a successful completion for the interrupted, old turn.
+    fake.emit(
+        "turn/completed",
+        {"turn": {"id": record.turn_id, "status": "completed", "items": []}},
+    )
+
+    assert record.state == SessionState.INTERRUPTED
+    assert store.get_task("task-1")["state"] == SessionState.INTERRUPTED.value
+    assert manager.status("task-1")["review_ready"] is False
+    assert not any(
+        event["type"] == "state_changed"
+        and event["data"].get("to") == SessionState.WAITING_REVIEW.value
+        for event in store.all_events("task-1")
+    )
 
 
 def test_restart_rejects_saved_worktree_outside_bridge_root(tmp_path):

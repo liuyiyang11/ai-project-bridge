@@ -36,6 +36,8 @@ Transport code validates input and calls the Supervisor; it does not create a wo
 
 ## Lifecycle and result contract
 
+GitHub code tasks use the same Supervisor/WorkerQueue/TaskRunner runtime as MCP. The GitHub adapter retains Issue parsing, trusted-actor validation, and status/comment/PR publication; presentation and experiment-review retain their compatibility paths for this release.
+
 TaskRunner owns the runtime lifecycle and exception conversion:
 
 ```text

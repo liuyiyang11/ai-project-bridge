@@ -43,7 +43,7 @@ class TaskRunner:
         self.store = store
         self.handlers = dict(handlers or {})
 
-    def run(self, task_id: str, *, recovery: bool = False) -> TaskResult:
+    def run(self, task_id: str, *, recovery: bool = False, continuation: bool = False) -> TaskResult:
         task = self.store.get_task(task_id)
         bus = TaskEventBus(self.store, task_id)
         try:
@@ -54,7 +54,7 @@ class TaskRunner:
             if current == "QUEUED":
                 bus.transition("QUEUED", "PREPARING", "worker accepted task")
                 current = "PREPARING"
-            elif current == "RUNNING" and recovery:
+            elif current == "RUNNING" and (recovery or continuation):
                 pass
             elif current != "PREPARING":
                 raise RuntimeError(f"task is not runnable from {current}")
