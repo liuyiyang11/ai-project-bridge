@@ -13,7 +13,7 @@ The legacy equivalent remains available:
 ```
 
 The adapter is intended for MCP-compatible local clients. See
-[mcp-client-setup.md](mcp-client-setup.md) for ChatGPT Desktop setup.
+[mcp-client-setup.md](mcp-client-setup.md) for compatible local MCP client setup, or [chatgpt-web-tunnel.md](chatgpt-web-tunnel.md) for ChatGPT Web through Secure MCP Tunnel.
 
 The server exposes exactly these tools. V0.2.1 makes only code-task startup asynchronous: `bridge_start_code_task` persists a `QUEUED` task and returns immediately while the shared worker runtime advances it in the background.
 

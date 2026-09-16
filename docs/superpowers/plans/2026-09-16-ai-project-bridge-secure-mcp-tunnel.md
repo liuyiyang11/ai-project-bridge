@@ -20,6 +20,7 @@
 - Create: tests/unit/test_tunnel_profile.py — offline tests for all new Python behavior.
 - Create: tests/smoke/test_secure_mcp_tunnel.py — default-skipped opt-in doctor smoke entry.
 - Modify: docs/mcp-client-setup.md — correct local-client versus ChatGPT Web transport wording.
+- Modify: docs/mcp-tools.md — correct the local setup cross-reference and link the Web Tunnel runbook.
 - Modify: README.md — add a short link to the Tunnel runbook only.
 - Do not modify: bridge/orchestration/**, bridge/codex/**, bridge/worktree.py, bridge/dispatcher.py, or task lifecycle code.
 
@@ -270,6 +271,7 @@ Expected: one skipped test and no process/network invocation.
 **Files:**
 - Create: docs/chatgpt-web-tunnel.md
 - Modify: docs/mcp-client-setup.md
+- Modify: docs/mcp-tools.md
 - Modify: README.md
 
 - [ ] Step 1: Write docs/chatgpt-web-tunnel.md.
@@ -294,11 +296,15 @@ Replace claims that ChatGPT Desktop directly starts the local Python STDIO serve
 
 Keep existing local STDIO instructions and link the new runbook.
 
-- [ ] Step 3: Add one README runbook link.
+- [ ] Step 3: Correct docs/mcp-tools.md.
+
+Replace the ChatGPT Desktop-only setup link with compatible local MCP client wording and a link to docs/chatgpt-web-tunnel.md for ChatGPT Web through Secure MCP Tunnel.
+
+- [ ] Step 4: Add one README runbook link.
 
 Do not rewrite runtime behavior and do not claim that a live tunnel is configured.
 
-- [ ] Step 4: Commit documentation.
+- [ ] Step 5: Commit documentation.
 
     git add docs/chatgpt-web-tunnel.md docs/mcp-client-setup.md README.md
     git commit -m "docs: document ChatGPT Web secure MCP tunnel"

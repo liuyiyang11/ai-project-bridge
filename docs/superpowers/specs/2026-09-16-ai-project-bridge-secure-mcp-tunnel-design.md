@@ -112,6 +112,8 @@ Add `docs/chatgpt-web-tunnel.md` describing:
 
 Update `docs/mcp-client-setup.md` so it no longer says that ChatGPT Desktop directly starts the local Python STDIO server. It must distinguish compatible local MCP clients from ChatGPT Web through Secure MCP Tunnel.
 
+Update the adjacent `docs/mcp-tools.md` cross-reference so it likewise names compatible local MCP clients and points ChatGPT Web readers to `docs/chatgpt-web-tunnel.md`.
+
 ### Tests
 
 Add offline unit tests for profile generation, validation, secret-reference invariants, Windows paths containing spaces, tunnel ID validation, fail-closed prerequisites, and failure-layer classification.
