@@ -165,11 +165,11 @@ def classify_doctor_failure(text: str) -> str:
 
 Use yaml.safe_load and yaml.safe_dump only for profile files. Do not import supervisors, queues, runners, Codex modules, or transports. Generate exactly one mcp.commands item with channel main; quote both absolute Windows paths in the command. Require tunnel_ followed by 32 lowercase hexadecimal characters. Keep errors generic and never echo key values.
 
-validate_profile must enforce config_version 1, control_plane.api_key exactly env:CONTROL_PLANE_API_KEY, no control_plane.tunnel_id, loopback health listener, top-level admin_ui.open_browser false, no mcp.server_urls, exactly one main command, and the command form:
+validate_profile must enforce config_version 1, the minimum generated-profile field whitelist, control_plane.api_key exactly env:CONTROL_PLANE_API_KEY, no control_plane.tunnel_id, loopback health listener, top-level admin_ui.open_browser false, no mcp.server_urls, exactly one main command, and the command form:
 
     "absolute-python-path" -m bridge.mcp.server --config "absolute-config-path"
 
-Reject literal fields whose names indicate API keys, admin keys, bearer tokens, or tunnel tokens anywhere in the profile mapping. validate_environment requires non-empty CONTROL_PLANE_API_KEY and a valid CONTROL_PLANE_TUNNEL_ID but returns neither value. sanitize_diagnostics replaces supplied secrets and obvious key-shaped values with [redacted]. classify_doctor_failure must map auth markers first, then local child start, MCP initialize, tools discovery, Codex discovery, and otherwise CONTROL_PLANE.
+Reject literal fields whose names indicate API keys, admin keys, bearer tokens, or tunnel tokens anywhere in the profile mapping. validate_environment requires non-empty CONTROL_PLANE_API_KEY and a valid CONTROL_PLANE_TUNNEL_ID but returns neither value. sanitize_diagnostics replaces supplied secrets, Authorization Bearer values, and obvious key-shaped values with [redacted]. classify_doctor_failure must map auth markers first, then local child start, MCP initialize, tools discovery, Codex discovery, and otherwise CONTROL_PLANE.
 
 Provide a fixed CLI with only:
 

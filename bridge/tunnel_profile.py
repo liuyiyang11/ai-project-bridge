@@ -22,6 +22,13 @@ _SECRET_FIELD_RE = re.compile(r"(?:api[_-]?key|admin[_-]?key|bearer|token)", re.
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(\b(?:api[_-]?key|admin[_-]?key|bearer|token)\b\s*[:=]\s*)[^\s,;]+"
 )
+_AUTHORIZATION_BEARER_RE = re.compile(
+    r"(?i)(\bAuthorization\b\s*:\s*Bearer\s+)[^\s,;]+"
+)
+_AUTHORIZATION_ASSIGNMENT_RE = re.compile(
+    r"(?i)(\bAuthorization\b\s*[:=]\s*)(?!Bearer\b)[^\s,;]+"
+)
+_BEARER_VALUE_RE = re.compile(r"(?i)(\bBearer\s+)[^\s,;]+")
 _OBVIOUS_SECRET_RE = re.compile(r"(?i)\bsk-[A-Za-z0-9_-]{8,}\b")
 
 
@@ -83,6 +90,12 @@ def _reject_secret_fields(value: Any, path: tuple[str, ...] = ()) -> None:
             _reject_secret_fields(child, path)
 
 
+def _ensure_allowed_fields(value: Mapping[str, Any], allowed: set[str], path: str) -> None:
+    for key in value:
+        if key not in allowed:
+            raise TunnelProfileError(f"unsupported profile field: {path}.{key}")
+
+
 def validate_profile(profile: Mapping[str, Any]) -> None:
     """Validate the Bridge-specific subset of tunnel-client's profile schema."""
     if not isinstance(profile, Mapping):
@@ -90,11 +103,13 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
     if profile.get("config_version") != 1:
         raise TunnelProfileError("profile config_version must be 1")
 
+    _ensure_allowed_fields(profile, {"config_version", "control_plane", "health", "admin_ui", "mcp"}, "profile")
     _reject_secret_fields(profile)
 
     control_plane = profile.get("control_plane")
     if not isinstance(control_plane, Mapping):
         raise TunnelProfileError("profile control_plane is required")
+    _ensure_allowed_fields(control_plane, {"base_url", "api_key"}, "control_plane")
     if control_plane.get("base_url") != "https://api.openai.com":
         raise TunnelProfileError("profile control_plane.base_url must be https://api.openai.com")
     if control_plane.get("api_key") != "env:CONTROL_PLANE_API_KEY":
@@ -105,6 +120,7 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
     health = profile.get("health")
     if not isinstance(health, Mapping):
         raise TunnelProfileError("profile health is required")
+    _ensure_allowed_fields(health, {"listen_addr", "url_file"}, "health")
     if health.get("listen_addr") != "127.0.0.1:8080":
         raise TunnelProfileError("health listener must remain on 127.0.0.1:8080")
     url_file = health.get("url_file")
@@ -115,10 +131,12 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
     admin_ui = profile.get("admin_ui")
     if not isinstance(admin_ui, Mapping) or admin_ui.get("open_browser") is not False:
         raise TunnelProfileError("admin_ui.open_browser must be false")
+    _ensure_allowed_fields(admin_ui, {"open_browser"}, "admin_ui")
 
     mcp = profile.get("mcp")
     if not isinstance(mcp, Mapping):
         raise TunnelProfileError("profile mcp is required")
+    _ensure_allowed_fields(mcp, {"commands"}, "mcp")
     if "server_urls" in mcp:
         raise TunnelProfileError("HTTP MCP server_urls are not allowed")
     commands = mcp.get("commands")
@@ -127,6 +145,7 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
     command = commands[0]
     if not isinstance(command, Mapping) or command.get("channel") != "main":
         raise TunnelProfileError("profile MCP command channel must be main")
+    _ensure_allowed_fields(command, {"channel", "command"}, "mcp.commands[0]")
     command_text = command.get("command")
     if not isinstance(command_text, str):
         raise TunnelProfileError("MCP command must include --config")
@@ -173,7 +192,10 @@ def sanitize_diagnostics(text: str, secret_values: Iterable[str] = ()) -> str:
     for secret in secret_values:
         if isinstance(secret, str) and secret:
             value = value.replace(secret, "[redacted]")
+    value = _AUTHORIZATION_BEARER_RE.sub(r"\1[redacted]", value)
+    value = _AUTHORIZATION_ASSIGNMENT_RE.sub(r"\1[redacted]", value)
     value = _SECRET_ASSIGNMENT_RE.sub(r"\1[redacted]", value)
+    value = _BEARER_VALUE_RE.sub(r"\1[redacted]", value)
     value = _OBVIOUS_SECRET_RE.sub("[redacted]", value)
     return value[:12000]
 

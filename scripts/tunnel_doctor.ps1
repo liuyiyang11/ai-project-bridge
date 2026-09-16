@@ -61,9 +61,20 @@ function Sanitize-Diagnostics {
     }
     $safe = [regex]::Replace(
         $safe,
+        '(?i)(\bAuthorization\b\s*:\s*Bearer\s+)[^\s,;]+',
+        '${1}[redacted]'
+    )
+    $safe = [regex]::Replace(
+        $safe,
+        '(?i)(\bAuthorization\b\s*[:=]\s*)(?!Bearer\b)[^\s,;]+',
+        '${1}[redacted]'
+    )
+    $safe = [regex]::Replace(
+        $safe,
         '(?i)(\b(?:api[_-]?key|admin[_-]?key|bearer|token)\b\s*[:=]\s*)[^\s,;]+',
         '${1}[redacted]'
     )
+    $safe = [regex]::Replace($safe, '(?i)(\bBearer\s+)[^\s,;]+', '${1}[redacted]')
     $safe = [regex]::Replace($safe, '(?i)\bsk-[A-Za-z0-9_-]{8,}\b', '[redacted]')
     return $safe.Substring(0, [Math]::Min($safe.Length, 12000))
 }

@@ -41,6 +41,16 @@ tunnel-client help quickstart
 
 本仓库不从第三方下载客户端，也不在 Python 包中重新实现 Tunnel 协议。
 
+官方也支持直接创建 named profile；以下只是 Part 2 的对照命令，本轮不执行：
+
+```powershell
+tunnel-client init --sample sample_mcp_stdio_local --profile local-stdio --tunnel-id 'tunnel_0123456789abcdef0123456789abcdef' --mcp-command '"C:\Users\29833\.conda\envs\py10\python.exe" -m bridge.mcp.server --config "F:\ai-project-bridge\config.local.yaml"'
+tunnel-client doctor --profile local-stdio --explain
+tunnel-client run --profile local-stdio
+```
+
+本仓库 wrapper 使用等价的显式 `--profile-file` 路径，以保证 profile 位于被忽略的 `.bridge` 目录并由仓库自己的生成/校验逻辑维护。
+
 ## Profile 设计
 
 仓库 wrapper 默认使用被 `.gitignore` 忽略的本地文件：

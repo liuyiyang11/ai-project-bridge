@@ -85,6 +85,16 @@ def test_validate_profile_rejects_duplicate_main_commands(tmp_path):
         validate_profile(profile)
 
 
+def test_validate_profile_rejects_unapproved_optional_fields(tmp_path):
+    profile = _profile(tmp_path)
+    profile["mcp"]["extra_headers"] = {
+        "Authorization": "Bearer runtime-token-placeholder",
+    }
+
+    with pytest.raises(TunnelProfileError, match="unsupported"):
+        validate_profile(profile)
+
+
 @pytest.mark.parametrize("path_name", ["python.exe", "config.local.yaml", "health.url"])
 def test_build_profile_requires_absolute_paths(path_name):
     paths = {
@@ -130,6 +140,14 @@ def test_sanitize_diagnostics_redacts_supplied_and_key_shaped_values():
     assert "sk-test-value" not in sanitized
     assert "sk-proj-abcdefghijklmnopqrstuvwxyz" not in sanitized
     assert sanitized == "key=[redacted] bearer=[redacted]"
+
+
+def test_sanitize_diagnostics_redacts_authorization_bearer_value():
+    text = "Authorization: Bearer runtime-token-placeholder"
+
+    sanitized = sanitize_diagnostics(text)
+
+    assert sanitized == "Authorization: Bearer [redacted]"
 
 
 @pytest.mark.parametrize(

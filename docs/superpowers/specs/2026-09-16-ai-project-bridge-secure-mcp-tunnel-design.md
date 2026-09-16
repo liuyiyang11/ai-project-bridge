@@ -73,7 +73,7 @@ mcp:
 
 `CONTROL_PLANE_TUNNEL_ID` is intentionally supplied by the environment at runtime rather than written into the generated profile. The API key is represented only by the official `env:CONTROL_PLANE_API_KEY` reference. No `mcp.server_urls` entry is generated.
 
-The validator rejects missing or incompatible schema fields, non-`main` or duplicate command channels, HTTP MCP bindings, missing `bridge.mcp.server`/`--config`, non-absolute local paths, and literal secret-bearing fields. It returns safe error messages without echoing secret values.
+The validator accepts only the generated profile's minimum field whitelist; this intentionally excludes optional tunnel-client sections such as MCP extra headers, proxy settings, and cloudflared overrides. It rejects missing or incompatible schema fields, non-`main` or duplicate command channels, HTTP MCP bindings, missing `bridge.mcp.server`/`--config`, non-absolute local paths, and literal secret-bearing fields. It returns safe error messages without echoing secret values.
 
 ### PowerShell helpers
 
@@ -96,7 +96,7 @@ TOOLS_DISCOVERY
 CODEX_DISCOVERY
 ```
 
-The classifier is conservative and safe: authentication markers take precedence over generic control-plane text, and the original client output is sanitized before display.
+The classifier is conservative and safe: authentication markers take precedence over generic control-plane text, and the original client output is sanitized before display, including `Authorization: Bearer ...`, `Authorization=...`, and common key-shaped values.
 
 ### Documentation
 
