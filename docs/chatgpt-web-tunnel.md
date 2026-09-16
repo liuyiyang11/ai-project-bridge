@@ -141,6 +141,11 @@ TOOLS_DISCOVERY
 CODEX_DISCOVERY
 ```
 
+doctor 主要用于 profile/config validation、credential/control-plane preflight，以及 MCP command executable/pre-start checks。上面的 `MCP_INITIALIZE`、`TOOLS_DISCOVERY`、`CODEX_DISCOVERY` taxonomy 可以保留用于归类诊断结果，但这三层不是 doctor 单独保证的：
+
+- MCP initialize 和 tools discovery 必须在 `tunnel-client run` 之后，通过 `/health/mcp`、`/health?details=true` 或真实 ChatGPT Connector request 验证；
+- Codex discovery 必须调用 `bridge_codex_catalog` 或执行真实 task 验证。
+
 doctor 通过后，在前台启动官方客户端：
 
 ```powershell
@@ -159,7 +164,19 @@ Invoke-RestMethod 'http://127.0.0.1:8080/readyz'
 Invoke-WebRequest 'http://127.0.0.1:8080/ui' -UseBasicParsing
 ```
 
-`/healthz` 只说明进程存活；`/readyz` 才用于判断 MCP probe/readiness 是否完成。
+| Endpoint | 只能证明什么 |
+| --- | --- |
+| `/healthz` | `tunnel-client` process alive。 |
+| `/readyz` | tunnel runtime startup readiness。对于 STDIO MCP，它可能在任何 MCP protocol exchange 之前就返回 200。 |
+
+`/healthz` 和 `/readyz` 都不能单独证明 MCP `initialize` 已发生、`tools/list` 已发生，或 Bridge tools 已被发现。STDIO 的 MCP protocol evidence 必须检查以下 GET endpoint：
+
+```powershell
+Invoke-RestMethod 'http://127.0.0.1:8080/health/mcp'
+Invoke-RestMethod 'http://127.0.0.1:8080/health?details=true'
+```
+
+至少确认 `mcp` component 已 `observed`/`discovered`，并存在 MCP initialize evidence、tools discovery evidence，且 tool catalog 包含预期 Bridge tool names。
 
 ## Part 2：账号与 ChatGPT Web 手工验收
 
@@ -201,7 +218,7 @@ Remove-Variable secureKey
 .\scripts\tunnel_start.ps1 -PythonExecutable $Python -ConfigPath $Config
 ```
 
-记录时只记录 tunnel ID、profile 名/路径、health 和 readiness；不要记录 key。确认 `/healthz`、`/readyz` 和（如当前版本提供）`/ui`，然后保持 `tunnel_start.ps1` 前台进程运行。
+记录时只记录 tunnel ID、profile 名/路径、health 和 readiness；不要记录 key。保持 `tunnel_start.ps1` 前台进程运行后，依次确认 `/healthz`、`/readyz` 和 `/health/mcp`（或 `/health?details=true`），并确认 main STDIO child 已 observed、MCP initialize 和 tools discovery evidence 存在、tool catalog 包含预期 Bridge tools。之后才进入 ChatGPT Web Connector discovery；`/ui`（如当前版本提供）只是辅助观察页，不替代上述 protocol evidence。
 
 ### 3. 配置 ChatGPT Web Connector
 
