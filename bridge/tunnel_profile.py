@@ -30,6 +30,11 @@ _AUTHORIZATION_ASSIGNMENT_RE = re.compile(
 )
 _BEARER_VALUE_RE = re.compile(r"(?i)(\bBearer\s+)[^\s,;]+")
 _OBVIOUS_SECRET_RE = re.compile(r"(?i)\bsk-[A-Za-z0-9_-]{8,}\b")
+_PASS_LINE_RE = re.compile(r"(?i)\bPASS(?:ED)?\b")
+_FAILURE_SIGNAL_RE = re.compile(
+    r"(?i)\b(?:FAIL(?:ED|URE)?|ERROR|401|403|unauthori[sz]ed|forbidden)\b"
+    r"|FAILED_CHECKS"
+)
 
 
 def _absolute_path(value: Union[str, Path], field: str) -> Path:
@@ -66,7 +71,10 @@ def build_profile(
             "commands": [
                 {
                     "channel": "main",
-                    "command": f'"{python_path}" -m bridge.mcp.server --config "{config_path}"',
+                    "command": (
+                        f'"{python_path.as_posix()}" -m bridge.mcp.server '
+                        f'--config "{config_path.as_posix()}"'
+                    ),
                 }
             ]
         },
@@ -200,9 +208,21 @@ def sanitize_diagnostics(text: str, secret_values: Iterable[str] = ()) -> str:
     return value[:12000]
 
 
+def _doctor_failure_evidence(text: str) -> str:
+    lines = [line for line in str(text).splitlines() if line.strip() and not _PASS_LINE_RE.search(line)]
+    failure_lines = [line for line in lines if _FAILURE_SIGNAL_RE.search(line)]
+    return "\n".join(failure_lines or lines)
+
+
 def classify_doctor_failure(text: str) -> str:
-    value = str(text).lower()
-    if re.search(r"\b(?:401|403)\b|unauthori[sz]ed|forbidden|api[_ -]?key|tunnel[_ -]?id.*required", value):
+    value = _doctor_failure_evidence(text).lower()
+    if re.search(
+        r"\b(?:401|403)\b|unauthori[sz]ed|forbidden|api[_ -]?key|"
+        r"\b(?:tunnel[_ -]?auth|control[_ -]?plane[_ -]?auth)\b|"
+        r"\b(?:auth|credential|credentials|authentication)\b|"
+        r"tunnel[_ -]?id.*required",
+        value,
+    ):
         return "TUNNEL_AUTH"
     if re.search(r"mcp (?:child|server)|child process|failed to start|spawn|executable|command not found", value):
         return "LOCAL_MCP_START"

@@ -43,9 +43,23 @@ def test_build_profile_uses_official_stdio_main_binding_and_env_key(tmp_path):
     assert profile["mcp"]["commands"] == [
         {
             "channel": "main",
-            "command": f'"{python_executable.resolve()}" -m bridge.mcp.server --config "{bridge_config.resolve()}"',
+            "command": f'"{python_executable.resolve().as_posix()}" -m bridge.mcp.server --config "{bridge_config.resolve().as_posix()}"',
         }
     ]
+    validate_profile(profile)
+
+
+def test_build_profile_serializes_windows_command_paths_with_forward_slashes():
+    profile = build_profile(
+        r"E:\anaconda\envs\py39\python.exe",
+        r"E:\ai-project-bridge\config.local.yaml",
+        r"E:\ai-project-bridge\.worktrees\secure-mcp-tunnel\.bridge\tunnel-health.url",
+    )
+
+    assert profile["mcp"]["commands"][0]["command"] == (
+        '"E:/anaconda/envs/py39/python.exe" -m bridge.mcp.server '
+        '--config "E:/ai-project-bridge/config.local.yaml"'
+    )
     validate_profile(profile)
 
 
@@ -167,3 +181,27 @@ def test_classify_doctor_failure_returns_required_layer(text, expected):
 
 def test_auth_classification_takes_precedence_over_generic_mcp_text():
     assert classify_doctor_failure("MCP initialize returned 403 forbidden") == "TUNNEL_AUTH"
+
+
+def test_classify_doctor_failure_ignores_passed_auth_check_when_local_check_fails():
+    text = "\n".join(
+        [
+            "CHECK control_plane_api_key PASS",
+            "CHECK mcp_command_executable FAIL executable could not be started",
+            "FAILED_CHECKS mcp_command_executable",
+        ]
+    )
+
+    assert classify_doctor_failure(text) == "LOCAL_MCP_START"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "CHECK control_plane_api_key FAIL invalid credential",
+        "FAILED_CHECKS tunnel_auth",
+        "403 forbidden from control plane",
+    ],
+)
+def test_classify_doctor_failure_maps_auth_failures_to_tunnel_auth(text):
+    assert classify_doctor_failure(text) == "TUNNEL_AUTH"
