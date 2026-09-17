@@ -4,6 +4,7 @@ import traceback
 from typing import Any, Mapping, Optional, Protocol
 
 from ..experiments.runtime import ExperimentRuntimeRegistry
+from ..security import validate_unicode_scalars
 from ..store.task_store import TaskStore
 from .event_bus import TaskEventBus
 from .models import TaskResult
@@ -89,6 +90,14 @@ class TaskRunner:
                 raise TypeError("task handlers must return TaskResult")
             if self._is_interrupted(task_id):
                 return self._interrupted_result()
+            result_artifacts = list(result.artifacts) if result.artifacts else []
+            validate_unicode_scalars(
+                {
+                    "message": result.message,
+                    "metadata": result.metadata,
+                    "artifacts": self.store._bounded_artifacts(result_artifacts),
+                }
+            )
             persisted = self._persist_result(task_id, result)
             # This is not outcome inference: an explicit control transition
             # can race a handler, and must win over its late result.

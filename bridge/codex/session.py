@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ..security import validate_unicode_scalars
 from ..task_store import TaskStore
 from .app_server import CodexAppServerClient
 from .model_catalog import CodexModelCatalog, CodexModelError
@@ -486,6 +487,7 @@ class CodexSessionManager:
         return CodexAppServerClient(binary, cwd=cwd)
 
     def _on_event(self, task_id: str, event: dict[str, Any]) -> None:
+        validate_unicode_scalars({"task_id": task_id, "event": event})
         with self._lock:
             record = self.sessions.get(task_id)
             if record is None:
@@ -586,6 +588,7 @@ class CodexSessionManager:
         return "reconnecting"
 
     def _emit_event(self, record: SessionRecord, method: str, params: dict[str, Any]) -> None:
+        validate_unicode_scalars({"method": method, "params": params})
         mapped = {
             "thread/started": "thread_started",
             "turn/started": "turn_started",

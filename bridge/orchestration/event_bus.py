@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable, Optional
 
+from ..security import validate_unicode_scalars
 from ..store.task_store import TaskStore, utc_now
 from .state_machine import InvalidTaskTransition, TaskStateMachine
 
@@ -49,9 +50,13 @@ class TaskEventBus:
         if event_type == "state_changed":
             raise ValueError("state_changed events require TaskEventBus.transition")
         event_task_id = task_id or self.task_id
+        event_data = data or {}
+        validate_unicode_scalars(
+            {"task_id": event_task_id, "type": event_type, "data": event_data}
+        )
         event_lock = self._lock_for(self.store, event_task_id)
         with event_lock, self.store.task_lock(event_task_id):
-            event = self._append_event_locked(event_task_id, event_type, data or {})
+            event = self._append_event_locked(event_task_id, event_type, event_data)
         with self._lock:
             subscribers = list(self._subscribers)
         for callback in subscribers:
@@ -75,6 +80,15 @@ class TaskEventBus:
         from_state = getattr(from_state, "value", from_state)
         to_state = getattr(to_state, "value", to_state)
         transition_data = self._validated_transition_updates(updates)
+        validate_unicode_scalars(
+            {
+                "task_id": event_task_id,
+                "from": from_state,
+                "to": to_state,
+                "reason": reason,
+                "updates": transition_data,
+            }
+        )
         event_lock = self._lock_for(self.store, event_task_id)
         with event_lock, self.store.task_lock(event_task_id):
             current = self.store.get_task(event_task_id).get("state")
@@ -119,15 +133,32 @@ class TaskEventBus:
         artifact manifest write and its corresponding events.
         """
 
+        metadata_payload = dict(metadata or {})
+        artifact_payload = list(artifacts or [])
+        bounded_artifacts = self.store._bounded_artifacts(artifact_payload)
+        validate_unicode_scalars(
+            {
+                "metadata": metadata_payload,
+                "artifacts": bounded_artifacts,
+                "artifact_events": [
+                    {
+                        "path": artifact.get("path"),
+                        "size": artifact.get("size", artifact.get("bytes")),
+                        "kind": artifact.get("kind"),
+                    }
+                    for artifact in bounded_artifacts
+                ],
+            }
+        )
         artifact_events: list[dict[str, Any]] = []
         with self._lock, self.store.task_lock(self.task_id):
             current = str(self.store.get_task(self.task_id).get("state", ""))
             if current != "RUNNING":
                 return False
-            if metadata:
-                self.store.update_task(self.task_id, **dict(metadata))
-            if artifacts:
-                manifest = self.store.save_artifacts(self.task_id, list(artifacts))
+            if metadata_payload:
+                self.store.update_task(self.task_id, **metadata_payload)
+            if artifact_payload:
+                manifest = self.store.save_artifacts(self.task_id, artifact_payload)
                 for artifact in manifest:
                     artifact_events.append(
                         self._append_event_locked(

@@ -12,6 +12,7 @@ from .executors.presentation import PresentationExecutor
 from .github import GhClient, Issue
 from .orchestration.models import TaskResult
 from .orchestration.supervisor import TaskSupervisor
+from .security import validate_unicode_scalars
 from .task_parser import TaskParseError, parse_rework_comment, parse_task_body
 from .task_store import TaskStore, utc_now
 
@@ -287,7 +288,6 @@ class Dispatcher:
 
     def _write_bundle(self, issue: Issue, task: Any, result: dict) -> None:
         bundle_dir = Path(result.get("bundle_dir") or (self.store.task_dir(issue.number) / "review_bundle"))
-        bundle_dir.mkdir(parents=True, exist_ok=True)
         manifest = {
             "task_id": f"issue-{issue.number}",
             "issue_number": issue.number,
@@ -305,15 +305,18 @@ class Dispatcher:
             "pr_url": result.get("pr_url"),
             "known_limitations": result.get("known_limitations", ""),
         }
-        (bundle_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         summary = bundle_dir / "summary.md"
+        summary_text = (
+            f"# Bridge review bundle\n\n- Issue: #{issue.number}\n- Task type: `{task.task_type}`\n- Project: `{task.project}`\n- Status: `review`\n\n"
+            + str(result.get("final_message") or "Deterministic review completed.")
+            + "\n"
+        )
+        validate_unicode_scalars({"manifest": manifest, "summary": summary_text})
+        manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8", "strict")
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        (bundle_dir / "manifest.json").write_bytes(manifest_bytes)
         if not summary.exists():
-            summary.write_text(
-                f"# Bridge review bundle\n\n- Issue: #{issue.number}\n- Task type: `{task.task_type}`\n- Project: `{task.project}`\n- Status: `review`\n\n"
-                + str(result.get("final_message") or "Deterministic review completed.")
-                + "\n",
-                encoding="utf-8",
-            )
+            summary.write_text(summary_text, encoding="utf-8")
 
     @staticmethod
     def _status(labels: set[str]) -> Optional[str]:

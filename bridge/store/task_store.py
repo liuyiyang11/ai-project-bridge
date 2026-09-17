@@ -220,6 +220,7 @@ class TaskStore:
             if "worktree" in updates and "worktree_path" not in updates:
                 state["worktree_path"] = updates["worktree"]
             state["updated_at"] = utc_now()
+            validate_unicode_scalars(state)
             self._write_compat_files(key, state, task_yaml=None)
             return self.get_task(key)
 
@@ -246,6 +247,15 @@ class TaskStore:
         updates: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         key = self._task_key(task_id)
+        validate_unicode_scalars(
+            {
+                "task_id": task_id,
+                "from_state": from_state,
+                "to_state": to_state,
+                "reason": reason,
+                "updates": updates or {},
+            }
+        )
         with self.task_lock(key):
             state = self.get_task(key)
             from_state = getattr(from_state, "value", from_state)
@@ -270,6 +280,7 @@ class TaskStore:
                 }
             )
             state["updated_at"] = utc_now()
+            validate_unicode_scalars(state)
             self._write_compat_files(key, state, task_yaml=None)
             return self.get_task(key)
 
@@ -287,6 +298,7 @@ class TaskStore:
         )
 
     def run_events_path(self, task_id: Union[int, str], run_number: int, run_kind: str) -> Path:
+        validate_unicode_scalars({"task_id": task_id, "run_kind": run_kind})
         if int(run_number) <= 0:
             raise ValueError("run number must be positive")
         if not re.fullmatch(r"[a-z][a-z0-9-]*", run_kind):
@@ -301,15 +313,27 @@ class TaskStore:
         state = self.get_task(key)
         runs = list(state.get("runs", []))
         run_number = max((int(item.get("number", 0)) for item in runs if isinstance(item, dict)), default=0) + 1
-        events_path = self.run_events_path(key, run_number, run_kind)
         record: dict[str, Any] = {
             "number": run_number,
             "kind": run_kind,
-            "events_path": events_path.relative_to(self.task_dir(key)).as_posix(),
+            "events_path": f"runs/{int(run_number):03d}-{run_kind}.events.jsonl",
             "requested_thread_id": requested_thread_id,
             "status": "running",
             "started_at": utc_now(),
         }
+        next_state = dict(state)
+        next_state.update({"runs": [*runs, record], "current_run": run_number})
+        validate_unicode_scalars(
+            {
+                "task_id": key,
+                "run_kind": run_kind,
+                "requested_thread_id": requested_thread_id,
+                "record": record,
+                "state": next_state,
+            }
+        )
+        self._preflight_compat_files(key, next_state, task_yaml=None)
+        self.run_events_path(key, run_number, run_kind)
         runs.append(record)
         self.update_task(key, runs=runs, current_run=run_number)
         return record
@@ -325,13 +349,23 @@ class TaskStore:
                 break
         else:
             raise ValueError(f"run does not exist: {run_number}")
+        validate_unicode_scalars({"run_number": run_number, "updates": updates, "runs": runs})
         self.update_task(key, runs=runs)
         return next(record for record in runs if int(record.get("number", 0)) == int(run_number))
 
     def write_result(self, task_id: Union[int, str], result: dict[str, Any]) -> None:
+        validate_unicode_scalars(result)
         self._write_json(self.task_path(task_id, "result.json"), result)
 
     def save_artifacts(self, task_id: Union[int, str], artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        bounded = self._bounded_artifacts(artifacts)
+        validate_unicode_scalars({"artifact_list": bounded, "artifact_manifest": "result.json"})
+        self.write_result(task_id, {"artifact_list": bounded})
+        self.update_task(task_id, artifact_manifest="result.json")
+        return bounded
+
+    @staticmethod
+    def _bounded_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         bounded: list[dict[str, Any]] = []
         for item in artifacts[:1000]:
             if not isinstance(item, dict):
@@ -343,19 +377,20 @@ class TaskStore:
                     safe[key] = value
             if isinstance(safe.get("path"), str) and not Path(safe["path"]).is_absolute() and ".." not in safe["path"].replace("\\", "/").split("/"):
                 bounded.append(safe)
-        self.write_result(task_id, {"artifact_list": bounded})
-        self.update_task(task_id, artifact_manifest="result.json")
         return bounded
 
     def append_event(self, task_id: Union[int, str], event: dict[str, Any]) -> None:
         if not isinstance(event, dict):
             raise ValueError("event must be an object")
+        validate_unicode_scalars(event)
         with self.task_lock(task_id):
             event_record = dict(event)
             event_record.setdefault("time", utc_now())
+            validate_unicode_scalars(event_record)
+            event_bytes = (json.dumps(event_record, ensure_ascii=False) + "\n").encode("utf-8", "strict")
             self.task_path(task_id, "events.jsonl").parent.mkdir(parents=True, exist_ok=True)
-            with self.task_path(task_id, "events.jsonl").open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps(event_record, ensure_ascii=False) + "\n")
+            with self.task_path(task_id, "events.jsonl").open("ab") as handle:
+                handle.write(event_bytes)
                 handle.flush()
                 os.fsync(handle.fileno())
 
@@ -402,10 +437,18 @@ class TaskStore:
         return result
 
     def append_stdout(self, task_id: Union[int, str], text: str) -> None:
+        if not isinstance(text, str):
+            raise TypeError("log text must be a string")
+        validate_unicode_scalars(text)
+        text.encode("utf-8", "strict")
         with self.task_path(task_id, "stdout.log").open("a", encoding="utf-8") as handle:
             handle.write(text)
 
     def append_stderr(self, task_id: Union[int, str], text: str) -> None:
+        if not isinstance(text, str):
+            raise TypeError("log text must be a string")
+        validate_unicode_scalars(text)
+        text.encode("utf-8", "strict")
         with self.task_path(task_id, "stderr.log").open("a", encoding="utf-8") as handle:
             handle.write(text)
 
@@ -678,18 +721,48 @@ class TaskStore:
             return True
 
     def _write_compat_files(self, task_id: str, state: dict[str, Any], *, task_yaml: Optional[str]) -> None:
+        task_yaml_bytes, state_bytes, task_bytes, result_bytes = self._preflight_compat_files(
+            task_id,
+            state,
+            task_yaml=task_yaml,
+        )
         directory = self.task_dir(task_id)
         directory.mkdir(parents=True, exist_ok=True)
-        if task_yaml is not None:
-            self.task_path(task_id, "task.yaml").write_text(task_yaml, encoding="utf-8")
-        elif not self.task_path(task_id, "task.yaml").is_file():
-            self.task_path(task_id, "task.yaml").write_text(self._task_yaml(state), encoding="utf-8")
-        self._write_json(self.task_path(task_id, "state.json"), state)
-        self._write_json(self.task_path(task_id, "task.json"), self._public_task_json(state))
+        if task_yaml_bytes is not None:
+            self.task_path(task_id, "task.yaml").write_bytes(task_yaml_bytes)
+        self._write_json_bytes(self.task_path(task_id, "state.json"), state_bytes)
+        self._write_json_bytes(self.task_path(task_id, "task.json"), task_bytes)
         for name in ("events.jsonl", "stdout.log", "stderr.log"):
             self.task_path(task_id, name).touch(exist_ok=True)
-        if not self.task_path(task_id, "result.json").is_file():
-            self._write_json(self.task_path(task_id, "result.json"), {})
+        if result_bytes is not None:
+            self._write_json_bytes(self.task_path(task_id, "result.json"), result_bytes)
+
+    def _preflight_compat_files(
+        self,
+        task_id: str,
+        state: dict[str, Any],
+        *,
+        task_yaml: Optional[str],
+    ) -> tuple[Optional[bytes], bytes, bytes, Optional[bytes]]:
+        validate_unicode_scalars(state)
+        state_bytes = self._json_bytes(state)
+        task_bytes = self._json_bytes(self._public_task_json(state))
+
+        task_yaml_bytes: Optional[bytes] = None
+        yaml_path = self.task_path(task_id, "task.yaml")
+        if task_yaml is not None:
+            validate_unicode_scalars(task_yaml)
+            task_yaml_bytes = task_yaml.encode("utf-8", "strict")
+        elif not yaml_path.is_file():
+            generated_yaml = self._task_yaml(state)
+            validate_unicode_scalars(generated_yaml)
+            task_yaml_bytes = generated_yaml.encode("utf-8", "strict")
+
+        result_bytes = None
+        result_path = self.task_path(task_id, "result.json")
+        if not result_path.is_file():
+            result_bytes = self._json_bytes({})
+        return task_yaml_bytes, state_bytes, task_bytes, result_bytes
 
     @staticmethod
     def _public_task_json(state: dict[str, Any]) -> dict[str, Any]:
@@ -736,16 +809,21 @@ class TaskStore:
 
     @staticmethod
     def _json_bytes(value: dict[str, Any]) -> bytes:
+        validate_unicode_scalars(value)
         return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8", "strict")
 
     @staticmethod
     def _write_json(path: Path, value: dict[str, Any]) -> None:
+        data = TaskStore._json_bytes(value)
+        TaskStore._write_json_bytes(path, data)
+
+    @staticmethod
+    def _write_json_bytes(path: Path, data: bytes) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(value, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp_name, path)
