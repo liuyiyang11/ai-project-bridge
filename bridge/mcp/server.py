@@ -11,6 +11,24 @@ from ..config import ConfigError, load_config
 from .tools import BridgeMcpTools, McpToolError
 
 
+def _configure_stdio_utf8() -> None:
+    """Make the real MCP protocol streams independent of the host code page."""
+
+    streams = (
+        ("stdin", sys.stdin, "strict"),
+        ("stdout", sys.stdout, "strict"),
+        ("stderr", sys.stderr, "backslashreplace"),
+    )
+    for name, stream, errors in streams:
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            raise RuntimeError(f"MCP {name} stream does not support UTF-8 configuration")
+        try:
+            reconfigure(encoding="utf-8", errors=errors)
+        except (AttributeError, OSError, ValueError) as exc:
+            raise RuntimeError(f"MCP {name} stream could not be configured as UTF-8") from exc
+
+
 class McpStdioServer:
     """Minimal MCP stdio transport; no HTTP listener is created."""
 
@@ -69,6 +87,8 @@ class McpStdioServer:
         return self._error(message_id, -32601, f"method not found: {method}")
 
     def serve(self, stdin: Optional[TextIO] = None, stdout: Optional[TextIO] = None) -> None:
+        if stdin is None and stdout is None:
+            _configure_stdio_utf8()
         input_stream = stdin or sys.stdin
         output_stream = stdout or sys.stdout
         for line in input_stream:

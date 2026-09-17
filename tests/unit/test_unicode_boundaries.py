@@ -24,7 +24,7 @@ def test_unicode_scalar_validator_accepts_valid_scalars(value):
     validate_unicode_scalars(value)
 
 
-@pytest.mark.parametrize("value", ["bad\ud800", "bad\udfff", {"nested": ["bad\ud800"]}, {"bad\udfff": "value"}])
+@pytest.mark.parametrize("value", ["bad\ud800", "bad\udc00", "bad\udfff", {"nested": ["bad\ud800"]}, {"bad\udfff": "value"}])
 def test_unicode_scalar_validator_rejects_lone_surrogates_without_reflecting_input(value):
     with pytest.raises(SecurityError, match=r"^input contains invalid Unicode scalar value$"):
         validate_unicode_scalars(value, path="request")
