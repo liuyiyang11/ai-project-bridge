@@ -1,12 +1,18 @@
 from __future__ import annotations
 
-import re
+import logging
 from typing import Any, Callable, Optional, Type
 
 from pydantic import BaseModel, ValidationError
 
 from ..orchestration.router import TaskRequest
 from ..orchestration.supervisor import TaskSupervisor
+from ..public_errors import (
+    public_error_from_exception,
+    public_error_from_message,
+    sanitize_public_events,
+    sanitize_public_status,
+)
 from ..security import validate_unicode_scalars
 from .schemas import (
     EmptyInput,
@@ -22,6 +28,9 @@ from .schemas import (
 
 class McpToolError(ValueError):
     """A safe, caller-facing MCP tool validation or execution error."""
+
+
+logger = logging.getLogger(__name__)
 
 
 class BridgeMcpTools:
@@ -65,19 +74,28 @@ class BridgeMcpTools:
     def call(self, name: str, arguments: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         schema = self._SCHEMAS.get(name)
         if schema is None:
-            raise McpToolError(f"unknown Bridge tool: {name}")
+            raise McpToolError("unknown Bridge tool")
         try:
             value = schema.parse_obj(arguments or {})
         except ValidationError as exc:
-            raise McpToolError(self._safe_error(str(exc))) from exc
+            public = public_error_from_exception(exc, context="mcp")
+            raise McpToolError(public.message) from None
         try:
             validate_unicode_scalars(self._model_values(value))
             handler = getattr(self, name)
             return handler(value)
-        except McpToolError:
-            raise
+        except McpToolError as exc:
+            public = public_error_from_exception(exc, context="mcp")
+            raise McpToolError(public.message) from None
         except Exception as exc:
-            raise McpToolError(self._safe_error(str(exc))) from exc
+            logger.error(
+                "MCP tool failed tool=%s error_type=%s",
+                name,
+                type(exc).__name__,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            public = public_error_from_exception(exc, context="mcp")
+            raise McpToolError(public.message) from None
 
     def bridge_list_projects(self, value: EmptyInput) -> dict[str, Any]:
         return {"projects": self.supervisor.list_projects()}
@@ -116,11 +134,11 @@ class BridgeMcpTools:
         )
 
     def bridge_task_status(self, value: TaskStatusInput) -> dict[str, Any]:
-        return self.supervisor.task_status(value.task_id)
+        return sanitize_public_status(self.supervisor.task_status(value.task_id))
 
     def bridge_task_events(self, value: TaskEventsInput) -> dict[str, Any]:
         events = self.supervisor.task_events(value.task_id, after_seq=value.after_seq, limit=value.limit)
-        return {"task_id": value.task_id, "events": events}
+        return {"task_id": value.task_id, "events": sanitize_public_events(events)}
 
     def bridge_control_task(self, value: TaskControlInput) -> dict[str, Any]:
         return self.supervisor.control_task(value.task_id, value.action, value.instruction)
@@ -141,8 +159,4 @@ class BridgeMcpTools:
 
     @staticmethod
     def _safe_error(message: str) -> str:
-        # Do not reflect Windows drive paths or common POSIX absolute paths in
-        # MCP errors.  The caller only needs the validation category.
-        value = re.sub(r"[A-Za-z]:\\[^\n\r,)]+", "<absolute-path>", message)
-        value = re.sub(r"(?<![A-Za-z0-9_])/(?:[^\s,)]+/)*[^\s,)]+", "<absolute-path>", value)
-        return value[:2000]
+        return public_error_from_message(message).message

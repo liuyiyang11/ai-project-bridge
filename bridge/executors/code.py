@@ -7,6 +7,7 @@ from ..codex.runner import CodexResumeMismatchError
 from ..collectors.git_collector import collect_git_state
 from ..commands import run_registered_command
 from ..config import ProjectConfig
+from ..public_errors import public_error_from_exception
 from ..security import ensure_safe_relative_path, resolve_under
 from ..task_store import utc_now
 from ..worktree import WorktreeManager
@@ -106,14 +107,16 @@ class CodeExecutor:
             else:
                 result = runner.start_task(prompt, info.path, events_path)
         except Exception as exc:
-            context.store.finish_run(context.issue.number, run_record["number"], status="failed", error=f"{type(exc).__name__}: {exc}")
+            public = public_error_from_exception(exc, context="task")
+            context.store.finish_run(context.issue.number, run_record["number"], status="failed", error=public.message)
             raise
         context.store.append_stdout(context.issue.number, _value(result, "stdout", ""))
         context.store.append_stderr(context.issue.number, _value(result, "stderr", ""))
         thread_id = _value(result, "thread_id")
         if requested_thread_id is not None and thread_id != requested_thread_id:
             mismatch = CodexResumeMismatchError(requested_thread_id, thread_id)
-            context.store.finish_run(context.issue.number, run_record["number"], status="failed", returned_thread_id=thread_id, error=str(mismatch))
+            public = public_error_from_exception(mismatch, context="codex")
+            context.store.finish_run(context.issue.number, run_record["number"], status="failed", returned_thread_id=thread_id, error=public.message)
             raise mismatch
         if thread_id:
             context.store.update_state(context.issue.number, thread_id=thread_id)
@@ -313,6 +316,7 @@ class RuntimeCodeExecutor:
                 from ..orchestration.models import TaskResult
 
                 return TaskResult(success=True, review_ready=False, message="task interrupted")
-            self.store.finish_run(task_id, run["number"], status="failed", error=f"{type(exc).__name__}: {exc}")
+            public = public_error_from_exception(exc, context="codex")
+            self.store.finish_run(task_id, run["number"], status="failed", error=public.message)
             raise
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from pathlib import Path
 from threading import RLock
@@ -12,6 +13,12 @@ from ..commands import run_registered_command
 from ..experiments.executor import ExperimentExecutor
 from ..experiments.runtime import ExperimentRuntimeRegistry
 from ..executors.code import RuntimeCodeExecutor
+from ..public_errors import (
+    public_error_from_exception,
+    public_error_from_message,
+    sanitize_public_events,
+    sanitize_public_status,
+)
 from ..security import SecurityError, ensure_safe_relative_path, resolve_under, validate_unicode_scalars
 from ..task_store import TaskStore, utc_now
 from ..worktree import WorktreeManager
@@ -20,6 +27,9 @@ from .router import TaskRequest, TaskRouter
 from .state_machine import InvalidTaskTransition, TaskStateMachine
 from .task_runner import CodeTaskHandler, ExperimentTaskHandler, TaskRunner
 from .worker import WorkerQueue
+
+
+logger = logging.getLogger(__name__)
 
 
 class TaskSupervisor:
@@ -340,7 +350,7 @@ class TaskSupervisor:
 
     def status(self, task_id: str) -> dict[str, Any]:
         state = self._stored_state(task_id)
-        return {
+        return sanitize_public_status({
             "task_id": task_id,
             "project": state.get("project"),
             "state": state.get("state", state.get("status", "UNKNOWN")),
@@ -354,11 +364,12 @@ class TaskSupervisor:
             "model": state.get("model"),
             "reasoning_effort": state.get("reasoning_effort"),
             "last_error": state.get("last_error"),
-        }
+            "error_code": state.get("error_code"),
+        })
 
     def task_events(self, task_id: str, *, after_seq: int = 0, limit: int = 100) -> list[dict[str, Any]]:
         self._stored_state(task_id)
-        return self.store.read_events(task_id, after_seq=after_seq, limit=limit)
+        return sanitize_public_events(self.store.read_events(task_id, after_seq=after_seq, limit=limit))
 
     def task_artifacts(self, task_id: str, *, kind: Optional[str] = None, limit: int = 100) -> list[dict[str, Any]]:
         if int(limit) < 1 or int(limit) > 1000:
@@ -597,10 +608,16 @@ class TaskSupervisor:
                     # durable state remains the source of truth.
                     continue
                 except Exception as exc:
+                    logger.error(
+                        "verified recovery could not be scheduled task_id=%s error_type=%s",
+                        task_id,
+                        type(exc).__name__,
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
                     self._mark_recovery_unknown(
                         task_id,
                         str(task_state),
-                        f"Bridge could not schedule verified recovery: {type(exc).__name__}: {exc}",
+                        "Bridge could not schedule verified recovery",
                     )
             elif task_state in {SessionState.PREPARING.value, SessionState.RUNNING.value} and task_type == "experiment":
                 self._mark_recovery_unknown(
@@ -650,10 +667,11 @@ class TaskSupervisor:
         return None
 
     def _mark_recovery_unknown(self, task_id: str, current: str, reason: str) -> None:
+        public = public_error_from_message(reason)
         if TaskStateMachine.can_transition(current, SessionState.UNKNOWN.value):
-            self._bus(task_id).transition(current, SessionState.UNKNOWN.value, reason)
-        self.store.update_task(task_id, last_error=reason[:2000])
-        self._bus(task_id).emit("error", {"message": reason[:2000], "previous_state": current})
+            self._bus(task_id).transition(current, SessionState.UNKNOWN.value, "recovery resume could not be verified")
+        self.store.update_task(task_id, last_error=public.message, error_code=public.error_code)
+        self._bus(task_id).emit("error", {**public.as_dict(), "previous_state": current})
 
     def _create_task(self, task_id: str, request: TaskRequest, project: Any) -> dict[str, Any]:
         if self.store.exists(task_id):
@@ -756,11 +774,17 @@ class TaskSupervisor:
             return
         state = self._stored_state(task_id)
         current = state.get("state", state.get("status", SessionState.QUEUED.value))
-        message = f"{type(error).__name__}: {error}"[:2000]
+        public = public_error_from_exception(error, context="task")
+        logger.error(
+            "supervisor task failed task_id=%s error_type=%s",
+            task_id,
+            type(error).__name__,
+            exc_info=(type(error), error, error.__traceback__),
+        )
         if current != SessionState.FAILED.value and TaskStateMachine.can_transition(current, SessionState.FAILED.value):
             self._bus(task_id).transition(str(current), SessionState.FAILED.value, "failed")
-        self.store.update_task(task_id, last_error=message)
-        self._bus(task_id).emit("error", {"message": message, "previous_state": current})
+        self.store.update_task(task_id, last_error=public.message, error_code=public.error_code)
+        self._bus(task_id).emit("error", {**public.as_dict(), "previous_state": current})
 
     def _stored_state(self, task_id: str) -> dict[str, Any]:
         if not self.store.exists(task_id):

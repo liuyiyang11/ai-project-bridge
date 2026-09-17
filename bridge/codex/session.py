@@ -15,6 +15,7 @@ from ..security import validate_unicode_scalars
 from ..task_store import TaskStore
 from .app_server import CodexAppServerClient
 from .model_catalog import CodexModelCatalog, CodexModelError
+from ..public_errors import sanitize_error_payload, sanitize_public_value, public_error_from_exception
 from .protocol import CodexProcessError, CodexProtocolError
 from .runner import CodexResumeMismatchError
 
@@ -494,8 +495,14 @@ class CodexSessionManager:
                 return
             if record.events_path:
                 record.events_path.parent.mkdir(parents=True, exist_ok=True)
+                safe_event = sanitize_public_value(event)
+                if isinstance(event.get("method"), str) and event.get("method") == "error":
+                    safe_event = {
+                        "method": "error",
+                        "params": sanitize_error_payload(event.get("params")),
+                    }
                 with record.events_path.open("a", encoding="utf-8", newline="\n") as handle:
-                    handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+                    handle.write(json.dumps(safe_event, ensure_ascii=False) + "\n")
             method = event.get("method")
             params = event.get("params") if isinstance(event.get("params"), dict) else {}
             logger.info("Codex task notification receive task_id=%s method=%s", task_id, method or "unknown")
@@ -541,7 +548,7 @@ class CodexSessionManager:
                 else:
                     self._fail(record, RuntimeError(self._turn_error(message) or str(message)))
             elif method == "warning":
-                record.current_action = str(params.get("message") or "warning")[:1000]
+                record.current_action = "warning"
             elif method == "thread/status/changed":
                 record.current_action = "thread status changed"
             elif method in {"turn/diff/updated", "item/fileChange/outputDelta", "item/fileChange/patchUpdated"}:
@@ -692,15 +699,21 @@ class CodexSessionManager:
             self._persist(record)
 
     def _fail(self, record: SessionRecord, error: Exception) -> None:
-        record.last_error = f"{type(error).__name__}: {error}"
-        logger.error("Codex task failed task_id=%s error_type=%s", record.task_id, type(error).__name__)
+        public = public_error_from_exception(error, context="codex")
+        record.last_error = public.message
+        logger.error(
+            "Codex task failed task_id=%s error_type=%s",
+            record.task_id,
+            type(error).__name__,
+            exc_info=(type(error), error, error.__traceback__),
+        )
         if record.state != SessionState.FAILED:
             self._set_state(record, SessionState.FAILED, "failed")
         else:
             record.current_action = "failed"
             self._persist(record)
         record.completion.set()
-        self._emit_event(record, "error", {"message": record.last_error})
+        self._emit_event(record, "error", public.as_dict())
         self._persist(record)
 
     def _close_client(self, task_id: str) -> None:

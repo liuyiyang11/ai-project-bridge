@@ -3,6 +3,12 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable, Optional
 
+from ..public_errors import (
+    sanitize_error_payload,
+    sanitize_public_events,
+    sanitize_public_text,
+    sanitize_public_value,
+)
 from ..security import validate_unicode_scalars
 from ..store.task_store import TaskStore, utc_now
 from .state_machine import InvalidTaskTransition, TaskStateMachine
@@ -80,12 +86,13 @@ class TaskEventBus:
         from_state = getattr(from_state, "value", from_state)
         to_state = getattr(to_state, "value", to_state)
         transition_data = self._validated_transition_updates(updates)
+        safe_reason = sanitize_public_text(reason, limit=1000)
         validate_unicode_scalars(
             {
                 "task_id": event_task_id,
                 "from": from_state,
                 "to": to_state,
-                "reason": reason,
+                "reason": safe_reason,
                 "updates": transition_data,
             }
         )
@@ -102,12 +109,12 @@ class TaskEventBus:
             event = self._append_event_locked(
                 event_task_id,
                 "state_changed",
-                {"from": from_state, "to": to_state, "reason": reason, **transition_data},
+                {"from": from_state, "to": to_state, "reason": safe_reason, **transition_data},
                 persist_cursor=False,
             )
             if from_state is not None:
                 transition_updates = {**transition_data, "event_seq": event["seq"], "last_event_seq": event["seq"]}
-                self.store._apply_transition(event_task_id, from_state, to_state, reason, updates=transition_updates)
+                self.store._apply_transition(event_task_id, from_state, to_state, safe_reason, updates=transition_updates)
             else:
                 self.store.update_task(event_task_id, event_seq=event["seq"], last_event_seq=event["seq"])
         with self._lock:
@@ -133,7 +140,9 @@ class TaskEventBus:
         artifact manifest write and its corresponding events.
         """
 
-        metadata_payload = dict(metadata or {})
+        metadata_payload = sanitize_public_value(dict(metadata or {}))
+        if not isinstance(metadata_payload, dict):
+            metadata_payload = {}
         artifact_payload = list(artifacts or [])
         bounded_artifacts = self.store._bounded_artifacts(artifact_payload)
         validate_unicode_scalars(
@@ -230,7 +239,7 @@ class TaskEventBus:
                 self.store.update_task(self.task_id, event_seq=max_seq, last_event_seq=max_seq)
 
     def events(self, *, after_seq: int = 0, limit: int = 100) -> list[dict[str, Any]]:
-        return self.store.list_events(self.task_id, after_seq=after_seq, limit=limit)
+        return sanitize_public_events(self.store.list_events(self.task_id, after_seq=after_seq, limit=limit))
 
     def _append_event_locked(
         self,
@@ -251,7 +260,11 @@ class TaskEventBus:
             "task_id": task_id,
             "type": event_type,
             "time": utc_now(),
-            "data": self._sanitize(data),
+            "data": self._sanitize(
+                sanitize_error_payload(data)
+                if event_type == "error"
+                else sanitize_public_value(data)
+            ),
         }
         self.store.append_event(task_id, event)
         if persist_cursor:

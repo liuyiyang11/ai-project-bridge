@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-import traceback
+import logging
 from typing import Any, Mapping, Optional, Protocol
 
 from ..experiments.runtime import ExperimentRuntimeRegistry
+from ..public_errors import public_error_from_exception
 from ..security import validate_unicode_scalars
 from ..store.task_store import TaskStore
 from .event_bus import TaskEventBus
 from .models import TaskResult
 from .state_machine import TaskStateMachine
+
+
+logger = logging.getLogger(__name__)
 
 
 class TaskHandler(Protocol):
@@ -48,6 +52,7 @@ class TaskRunner:
             "event_seq",
             "last_event_seq",
             "last_error",
+            "error_code",
         }
     )
 
@@ -145,14 +150,20 @@ class TaskRunner:
         )
 
     def _mark_unknown(self, task_id: str, error: Exception) -> TaskResult:
-        message = f"recovery could not safely resume task: {type(error).__name__}: {error}"[:2000]
+        public = public_error_from_exception(error, context="recovery")
+        logger.error(
+            "task recovery could not be verified task_id=%s error_type=%s",
+            task_id,
+            type(error).__name__,
+            exc_info=(type(error), error, error.__traceback__),
+        )
         bus = TaskEventBus(self.store, task_id)
         current = str(self.store.get_task(task_id).get("state", ""))
         if current != "UNKNOWN" and TaskStateMachine.can_transition(current, "UNKNOWN"):
             bus.transition(current, "UNKNOWN", "recovery resume could not be verified")
-        bus.emit("error", {"message": message, "previous_state": current})
-        self.store.update_task(task_id, last_error=message)
-        return TaskResult(success=False, message=message)
+        bus.emit("error", {**public.as_dict(), "previous_state": current})
+        self.store.update_task(task_id, last_error=public.message, error_code=public.error_code)
+        return TaskResult(success=False, message=public.message)
 
     def _is_interrupted(self, task_id: str) -> bool:
         return str(self.store.get_task(task_id).get("state", "")) == "INTERRUPTED"
@@ -162,15 +173,18 @@ class TaskRunner:
         return TaskResult(success=True, review_ready=False, message="task interrupted")
 
     def _fail(self, task_id: str, error: Exception, *, message: Optional[str] = None) -> None:
-        message = (message or f"{type(error).__name__}: {error}")[:2000]
-        formatted = traceback.format_exc(limit=6)
-        summary = "" if formatted.strip() == "NoneType: None" else " ".join(formatted.splitlines())[-4000:]
+        public = public_error_from_exception(error, context="task")
+        logger.error(
+            "task failed task_id=%s error_type=%s",
+            task_id,
+            type(error).__name__,
+            exc_info=(type(error), error, error.__traceback__),
+        )
         bus = TaskEventBus(self.store, task_id)
         current = str(self.store.get_task(task_id).get("state", ""))
         already_failed = current == "FAILED"
         if not already_failed and TaskStateMachine.can_transition(current, "FAILED"):
             bus.transition(current, "FAILED", "task failed")
         if not already_failed:
-            bus.emit("error", {"message": message, "traceback": summary})
-        last_error = f"{message}; traceback: {summary}" if summary else message
-        self.store.update_task(task_id, last_error=last_error)
+            bus.emit("error", public.as_dict())
+        self.store.update_task(task_id, last_error=public.message, error_code=public.error_code)
