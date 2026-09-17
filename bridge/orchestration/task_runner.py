@@ -3,6 +3,7 @@ from __future__ import annotations
 import traceback
 from typing import Any, Mapping, Optional, Protocol
 
+from ..experiments.runtime import ExperimentRuntimeRegistry
 from ..store.task_store import TaskStore
 from .event_bus import TaskEventBus
 from .models import TaskResult
@@ -49,14 +50,25 @@ class TaskRunner:
         }
     )
 
-    def __init__(self, *, store: TaskStore, handlers: Optional[Mapping[str, TaskHandler]] = None):
+    def __init__(
+        self,
+        *,
+        store: TaskStore,
+        handlers: Optional[Mapping[str, TaskHandler]] = None,
+        experiment_runtime: Optional[ExperimentRuntimeRegistry] = None,
+    ):
         self.store = store
         self.handlers = dict(handlers or {})
+        self.experiment_runtime = experiment_runtime
 
     def run(self, task_id: str, *, recovery: bool = False, continuation: bool = False) -> TaskResult:
         task = self.store.get_task(task_id)
         bus = TaskEventBus(self.store, task_id)
+        runtime_registered = False
         try:
+            if str(task.get("task_type", "code")) == "experiment" and self.experiment_runtime is not None:
+                self.experiment_runtime.register(task_id)
+                runtime_registered = True
             handler = self.handlers.get(str(task.get("task_type", "code")))
             if handler is None:
                 raise ValueError(f"task type is not supported by the runtime: {task.get('task_type')}")
@@ -75,11 +87,17 @@ class TaskRunner:
             result = handler.execute(task)
             if not isinstance(result, TaskResult):
                 raise TypeError("task handlers must return TaskResult")
-            self._persist_result(task_id, result)
+            if self._is_interrupted(task_id):
+                return self._interrupted_result()
+            persisted = self._persist_result(task_id, result)
             # This is not outcome inference: an explicit control transition
             # can race a handler, and must win over its late result.
             if self._is_interrupted(task_id):
                 return self._interrupted_result()
+            if not persisted:
+                # Another lifecycle owner already moved the task away from
+                # RUNNING.  Do not apply a late handler outcome to that state.
+                return result
             if not result.success:
                 if recovery:
                     return self._mark_unknown(task_id, RuntimeError(result.message or "task handler reported failure"))
@@ -99,28 +117,23 @@ class TaskRunner:
                 return self._mark_unknown(task_id, exc)
             self._fail(task_id, exc)
             raise
+        finally:
+            if runtime_registered and self.experiment_runtime is not None:
+                self.experiment_runtime.detach(task_id)
 
-    def _persist_result(self, task_id: str, result: TaskResult) -> None:
+    def _persist_result(self, task_id: str, result: TaskResult) -> bool:
+        metadata: Optional[dict[str, Any]] = None
         if result.metadata:
             metadata = dict(result.metadata)
             reserved = self._RESULT_LIFECYCLE_FIELDS.intersection(metadata)
             if reserved:
                 names = ", ".join(sorted(reserved))
                 raise ValueError(f"task result metadata cannot replace lifecycle fields: {names}")
-            self.store.update_task(task_id, **metadata)
-        if not result.artifacts:
-            return
-        manifest = self.store.save_artifacts(task_id, list(result.artifacts))
         bus = TaskEventBus(self.store, task_id)
-        for artifact in manifest:
-            bus.emit(
-                "artifact_created",
-                {
-                    "path": artifact.get("path"),
-                    "size": artifact.get("size", artifact.get("bytes")),
-                    "kind": artifact.get("kind"),
-                },
-            )
+        return bus.persist_result_if_active(
+            metadata=metadata,
+            artifacts=list(result.artifacts) if result.artifacts else None,
+        )
 
     def _mark_unknown(self, task_id: str, error: Exception) -> TaskResult:
         message = f"recovery could not safely resume task: {type(error).__name__}: {error}"[:2000]

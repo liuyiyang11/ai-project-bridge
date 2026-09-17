@@ -10,14 +10,16 @@ from ..security import SecurityError, ensure_safe_project_name, ensure_safe_rela
 from ..store.task_store import TaskStore
 from .artifacts import ArtifactContract
 from .metrics import MetricCollector
+from .runtime import ExperimentRuntime, ExperimentRuntimeRegistry
 
 
 class ExperimentExecutor:
     """Run one pre-registered experiment command and collect public outputs."""
 
-    def __init__(self, config: Any, store: TaskStore):
+    def __init__(self, config: Any, store: TaskStore, *, runtime_registry: ExperimentRuntimeRegistry | None = None):
         self.config = config
         self.store = store
+        self.runtime_registry = runtime_registry or ExperimentRuntimeRegistry()
 
     def execute(self, task: dict[str, Any]) -> TaskResult:
         from ..orchestration.models import TaskResult
@@ -32,48 +34,77 @@ class ExperimentExecutor:
         if not project_root.is_dir():
             raise RuntimeError(f"registered project root does not exist: {project_root}")
 
-        command_result = run_registered_command(project, command_id, project_root, self.config.python_executable)
-        stdout = command_result.stdout or ""
-        stderr = command_result.stderr or ""
-        self.store.append_stdout(task_id, stdout)
-        self.store.append_stderr(task_id, stderr)
+        runtime = self.runtime_registry.current(task_id)
+        owns_runtime = runtime is None
+        if runtime is None:
+            runtime = self.runtime_registry.register(task_id)
+        try:
+            if self._cancel_requested(task_id, runtime):
+                return self._interrupted_result()
+            command_result = run_registered_command(
+                project,
+                command_id,
+                project_root,
+                self.config.python_executable,
+                runtime=runtime,
+                runtime_registry=self.runtime_registry,
+            )
+            if self._cancel_requested(task_id, runtime):
+                return self._interrupted_result()
 
-        bundle_dir = self.store.task_dir(task_id) / "experiment_bundle"
-        logs_dir = bundle_dir / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        max_log_bytes = int(self.config.limits.max_artifact_file_mb) * 1024 * 1024
-        stdout_size = self._write_log(logs_dir / "stdout.log", stdout, max_log_bytes)
-        stderr_size = self._write_log(logs_dir / "stderr.log", stderr, max_log_bytes)
-        log_artifacts = [
-            ArtifactContract.log_artifact("logs/stdout.log", stdout_size),
-            ArtifactContract.log_artifact("logs/stderr.log", stderr_size),
-        ]
+            stdout = command_result.stdout or ""
+            stderr = command_result.stderr or ""
+            self.store.append_stdout(task_id, stdout)
+            self.store.append_stderr(task_id, stderr)
 
-        if command_result.returncode != 0:
-            raise RuntimeError(f"configured experiment command failed with code {command_result.returncode}")
+            bundle_dir = self.store.task_dir(task_id) / "experiment_bundle"
+            logs_dir = bundle_dir / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            max_log_bytes = int(self.config.limits.max_artifact_file_mb) * 1024 * 1024
+            stdout_size = self._write_log(logs_dir / "stdout.log", stdout, max_log_bytes)
+            stderr_size = self._write_log(logs_dir / "stderr.log", stderr, max_log_bytes)
+            log_artifacts = [
+                ArtifactContract.log_artifact("logs/stdout.log", stdout_size),
+                ArtifactContract.log_artifact("logs/stderr.log", stderr_size),
+            ]
 
-        collected = collect_artifacts(project_root, project.artifact_dirs, bundle_dir, self.config.limits)
-        artifacts = log_artifacts + ArtifactContract.from_records(collected)
-        metric_sources = [
-            resolve_under(project_root, item["source"])
-            for item in collected
-            if isinstance(item.get("source"), str)
-            and self._is_metrics_artifact(item["source"])
-        ]
-        metric_limit = int(self.config.limits.max_artifact_file_mb) * 1024 * 1024
-        metrics = MetricCollector(max_file_bytes=metric_limit).collect(metric_sources, root=project_root)
-        return TaskResult(
-            success=True,
-            review_ready=True,
-            message=f"Experiment command {command_id} completed; collected {len(artifacts)} artifacts.",
-            artifacts=artifacts,
-            metadata={
-                "experiment_command_id": command_id,
-                "experiment_returncode": int(command_result.returncode),
-                "artifact_contract": ArtifactContract.VERSION,
-                "metrics": metrics,
-            },
-        )
+            if command_result.returncode != 0:
+                raise RuntimeError(f"configured experiment command failed with code {command_result.returncode}")
+
+            collected = collect_artifacts(project_root, project.artifact_dirs, bundle_dir, self.config.limits)
+            artifacts = log_artifacts + ArtifactContract.from_records(collected)
+            metric_sources = [
+                resolve_under(project_root, item["source"])
+                for item in collected
+                if isinstance(item.get("source"), str)
+                and self._is_metrics_artifact(item["source"])
+            ]
+            metric_limit = int(self.config.limits.max_artifact_file_mb) * 1024 * 1024
+            metrics = MetricCollector(max_file_bytes=metric_limit).collect(metric_sources, root=project_root)
+            return TaskResult(
+                success=True,
+                review_ready=True,
+                message=f"Experiment command {command_id} completed; collected {len(artifacts)} artifacts.",
+                artifacts=artifacts,
+                metadata={
+                    "experiment_command_id": command_id,
+                    "experiment_returncode": int(command_result.returncode),
+                    "artifact_contract": ArtifactContract.VERSION,
+                    "metrics": metrics,
+                },
+            )
+        finally:
+            if owns_runtime:
+                self.runtime_registry.detach(task_id)
+
+    def _cancel_requested(self, task_id: str, runtime: ExperimentRuntime) -> bool:
+        return runtime.cancel_event.is_set() or str(self.store.get_task(task_id).get("state", "")) == "INTERRUPTED"
+
+    @staticmethod
+    def _interrupted_result() -> TaskResult:
+        from ..orchestration.models import TaskResult
+
+        return TaskResult(success=True, review_ready=False, message="task interrupted")
 
     @staticmethod
     def _validate_task(task: dict[str, Any]) -> tuple[str, str, str]:

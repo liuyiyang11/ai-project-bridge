@@ -10,6 +10,7 @@ from ..codex.session import CodexSessionManager, SessionState, SessionTransition
 from ..collectors.artifact_collector import collect_artifacts
 from ..commands import run_registered_command
 from ..experiments.executor import ExperimentExecutor
+from ..experiments.runtime import ExperimentRuntimeRegistry
 from ..executors.code import RuntimeCodeExecutor
 from ..security import SecurityError, ensure_safe_relative_path, resolve_under, validate_unicode_scalars
 from ..task_store import TaskStore, utc_now
@@ -47,13 +48,24 @@ class TaskSupervisor:
             self.session_manager,
             self._prepare_worktree_for_task,
         )
-        self._experiment_executor = experiment_executor or ExperimentExecutor(config, self.store)
+        supplied_experiment_runtime = getattr(experiment_executor, "runtime_registry", None)
+        self._experiment_runtime = (
+            supplied_experiment_runtime
+            if isinstance(supplied_experiment_runtime, ExperimentRuntimeRegistry)
+            else ExperimentRuntimeRegistry()
+        )
+        self._experiment_executor = experiment_executor or ExperimentExecutor(
+            config,
+            self.store,
+            runtime_registry=self._experiment_runtime,
+        )
         self.task_runner = task_runner or TaskRunner(
             store=self.store,
             handlers={
                 "code": CodeTaskHandler(self._code_executor),
                 "experiment": ExperimentTaskHandler(self._experiment_executor),
             },
+            experiment_runtime=self._experiment_runtime,
         )
         self._lifecycle_lock = RLock()
         self._closing = False
@@ -393,6 +405,7 @@ class TaskSupervisor:
         active_states = {SessionState.PREPARING.value, SessionState.RUNNING.value}
         try:
             self._cancel_queued_tasks()
+            self._interrupt_running_experiments()
             claimed = self.session_manager.begin_shutdown()
             for record in claimed:
                 if not self.store.exists(record.task_id):
@@ -429,6 +442,32 @@ class TaskSupervisor:
                 # Running workers are released by SessionRecord.completion;
                 # never wait unboundedly for unrelated queue jobs here.
                 self.worker_queue.shutdown(wait=False, cancel_futures=True)
+
+    def _interrupt_running_experiments(self) -> None:
+        active_states = {SessionState.PREPARING.value, SessionState.RUNNING.value}
+        for task_id in self.store.list_task_ids():
+            try:
+                state = self.store.get_task(task_id)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if state.get("task_type", "code") != "experiment":
+                continue
+            current = str(state.get("state", state.get("status", "")))
+            if current not in active_states:
+                continue
+            try:
+                self._bus(task_id).transition(
+                    current,
+                    SessionState.INTERRUPTED.value,
+                    "bridge shutdown",
+                    updates={"review_ready": False},
+                )
+            except InvalidTaskTransition:
+                # A normal completion or another lifecycle owner won the
+                # durable race.  Only cancel a runtime after the interrupt
+                # transition itself has linearized.
+                continue
+            self._experiment_runtime.request_cancel(task_id)
 
     def _enqueue_code_task(self, request: TaskRequest, *, worktree: Optional[Path] = None) -> dict[str, Any]:
         TaskRouter.route(request)

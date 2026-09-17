@@ -105,6 +105,51 @@ class TaskEventBus:
                 continue
         return event
 
+    def persist_result_if_active(
+        self,
+        *,
+        metadata: Optional[dict[str, Any]] = None,
+        artifacts: Optional[list[dict[str, Any]]] = None,
+    ) -> bool:
+        """Persist one handler result only while the task is still RUNNING.
+
+        The EventBus lock is acquired before the TaskStore task lock, matching
+        ``transition`` and ``emit``.  Artifact events are appended while both
+        locks are held, so a shutdown transition cannot linearize between the
+        artifact manifest write and its corresponding events.
+        """
+
+        artifact_events: list[dict[str, Any]] = []
+        with self._lock, self.store.task_lock(self.task_id):
+            current = str(self.store.get_task(self.task_id).get("state", ""))
+            if current != "RUNNING":
+                return False
+            if metadata:
+                self.store.update_task(self.task_id, **dict(metadata))
+            if artifacts:
+                manifest = self.store.save_artifacts(self.task_id, list(artifacts))
+                for artifact in manifest:
+                    artifact_events.append(
+                        self._append_event_locked(
+                            self.task_id,
+                            "artifact_created",
+                            {
+                                "path": artifact.get("path"),
+                                "size": artifact.get("size", artifact.get("bytes")),
+                                "kind": artifact.get("kind"),
+                            },
+                        )
+                    )
+        for event in artifact_events:
+            with self._lock:
+                subscribers = list(self._subscribers)
+            for callback in subscribers:
+                try:
+                    callback(dict(event))
+                except Exception:
+                    continue
+        return True
+
     def reconcile(self) -> None:
         """Replay journaled transitions left incomplete by a process crash."""
         with self._lock, self.store.task_lock(self.task_id):
