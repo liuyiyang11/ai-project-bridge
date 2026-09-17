@@ -18,7 +18,11 @@ class TaskState(str, Enum):
 
 
 TASK_TRANSITIONS: dict[str, set[str]] = {
-    TaskState.QUEUED.value: {TaskState.PREPARING.value, TaskState.FAILED.value},
+    TaskState.QUEUED.value: {
+        TaskState.PREPARING.value,
+        TaskState.FAILED.value,
+        TaskState.CANCELLED.value,
+    },
     TaskState.PREPARING.value: {
         TaskState.RUNNING.value,
         TaskState.FAILED.value,
