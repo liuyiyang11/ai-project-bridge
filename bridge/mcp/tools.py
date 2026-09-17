@@ -7,6 +7,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..orchestration.router import TaskRequest
 from ..orchestration.supervisor import TaskSupervisor
+from ..security import validate_unicode_scalars
 from .schemas import (
     EmptyInput,
     StartCodeInput,
@@ -70,6 +71,7 @@ class BridgeMcpTools:
         except ValidationError as exc:
             raise McpToolError(self._safe_error(str(exc))) from exc
         try:
+            validate_unicode_scalars(self._model_values(value))
             handler = getattr(self, name)
             return handler(value)
         except McpToolError:
@@ -125,6 +127,17 @@ class BridgeMcpTools:
 
     def bridge_task_artifacts(self, value: TaskArtifactsInput) -> dict[str, Any]:
         return {"task_id": value.task_id, "artifacts": self.supervisor.task_artifacts(value.task_id, kind=value.kind, limit=value.limit)}
+
+    @staticmethod
+    def _model_values(value: BaseModel) -> Any:
+        """Return model data on both Pydantic v1 and v2."""
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            return model_dump()
+        as_dict = getattr(value, "dict", None)
+        if callable(as_dict):
+            return as_dict()
+        return value
 
     @staticmethod
     def _safe_error(message: str) -> str:

@@ -399,9 +399,56 @@ class CodexSessionManager:
     def status(self, task_id: str) -> dict[str, Any]:
         return self._get(task_id).public_dict()
 
+    def begin_shutdown(self) -> list[SessionRecord]:
+        """Claim active sessions before any client is closed.
+
+        The claim is the late-notification fence.  ``_on_event`` uses the
+        same lock, so a completion either wins before this method or is
+        ignored after ``interrupt_requested`` is set.
+        """
+        with self._lock:
+            claimed: list[SessionRecord] = []
+            for record in self.sessions.values():
+                if record.state in {SessionState.PREPARING, SessionState.RUNNING}:
+                    record.interrupt_requested = True
+                    claimed.append(record)
+            return claimed
+
+    def terminalize_shutdown(self, records: list[SessionRecord]) -> None:
+        """Finish local shutdown state after the owner persisted its intent.
+
+        This method deliberately does not perform a durable state transition.
+        ``TaskSupervisor`` owns durable shutdown for runtime tasks; the
+        session manager owns only local terminalization and waiter wakeup.
+        """
+        with self._lock:
+            for record in records:
+                current = self.sessions.get(record.task_id)
+                if current is not record:
+                    continue
+                record.interrupt_requested = True
+                record.state = SessionState.INTERRUPTED
+                record.current_action = "bridge shutdown"
+                record.completion.set()
+                self._persist(record)
+
     def close(self) -> None:
+        """Locally fail-safe active sessions, then close all client resources.
+
+        This direct manager path cannot own Supervisor durable transitions;
+        it prevents an active record from becoming a stranded waiter.
+        ``TaskSupervisor.close`` persists runtime-task shutdown first.
+        """
+        claimed = self.begin_shutdown()
+        self.terminalize_shutdown(claimed)
+        close_error: Optional[BaseException] = None
         for task_id in list(self._clients):
-            self._close_client(task_id)
+            try:
+                self._close_client(task_id)
+            except BaseException as exc:
+                close_error = close_error or exc
+        if close_error is not None:
+            raise close_error
 
     def _new_client(self, record: SessionRecord) -> Any:
         handler = lambda event: self._on_event(record.task_id, event)

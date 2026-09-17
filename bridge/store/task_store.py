@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import shutil
+import stat
 import tempfile
 import threading
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Union
 
+from ..security import validate_unicode_scalars
 from .models import TASK_TRANSITIONS, TaskState
+
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> str:
@@ -20,6 +29,8 @@ class TaskStore:
     """Filesystem-backed task snapshots, events, logs, and manifests."""
 
     _FILES = ("task.json", "task.yaml", "state.json", "events.jsonl", "stdout.log", "stderr.log", "result.json")
+    _STAGING_NAME = re.compile(r"\.task-[A-Za-z0-9][A-Za-z0-9._-]{0,127}-[A-Za-z0-9_-]+\.tmp\Z")
+    _CLAIM_NAME = re.compile(r"\.task-[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.claim\Z")
     _task_locks_guard = threading.Lock()
     _task_locks: dict[str, threading.RLock] = {}
 
@@ -66,7 +77,8 @@ class TaskStore:
         **metadata: Any,
     ) -> dict[str, Any]:
         key = self._task_key(task_id)
-        if self.exists(key):
+        final_directory = self.task_dir(key)
+        if final_directory.exists() or final_directory.is_symlink():
             raise ValueError(f"task already exists: {key}")
         reserved = {
             "state",
@@ -110,7 +122,23 @@ class TaskStore:
         }
         if isinstance(task_id, int):
             state["issue_number"] = int(task_id)
-        self._write_compat_files(key, state, task_yaml=self._task_yaml(state))
+        validate_unicode_scalars(state)
+        task_yaml_bytes = self._task_yaml(state).encode("utf-8", "strict")
+        state_bytes = self._json_bytes(state)
+        task_bytes = self._json_bytes(self._public_task_json(state))
+        result_bytes = self._json_bytes({})
+        self._create_task_atomic(
+            key,
+            {
+                "task.yaml": task_yaml_bytes,
+                "state.json": state_bytes,
+                "task.json": task_bytes,
+                "events.jsonl": b"",
+                "stdout.log": b"",
+                "stderr.log": b"",
+                "result.json": result_bytes,
+            },
+        )
         return self.get_task(key)
 
     def initialize(self, task_id: Union[int, str], task_yaml: str, state: dict[str, Any]) -> None:
@@ -137,7 +165,24 @@ class TaskStore:
         }
         if isinstance(task_id, int):
             initial["issue_number"] = int(task_id)
-        self._write_compat_files(key, initial, task_yaml=task_yaml)
+        validate_unicode_scalars(task_yaml)
+        validate_unicode_scalars(initial)
+        task_yaml_bytes = task_yaml.encode("utf-8", "strict")
+        state_bytes = self._json_bytes(initial)
+        task_bytes = self._json_bytes(self._public_task_json(initial))
+        result_bytes = self._json_bytes({})
+        self._create_task_atomic(
+            key,
+            {
+                "task.yaml": task_yaml_bytes,
+                "state.json": state_bytes,
+                "task.json": task_bytes,
+                "events.jsonl": b"",
+                "stdout.log": b"",
+                "stderr.log": b"",
+                "result.json": result_bytes,
+            },
+        )
 
     def get_task(self, task_id: Union[int, str]) -> dict[str, Any]:
         key = self._task_key(task_id)
@@ -230,6 +275,16 @@ class TaskStore:
 
     def exists(self, task_id: Union[int, str]) -> bool:
         return self.task_path(task_id, "state.json").is_file() or self.task_path(task_id, "task.json").is_file()
+
+    def is_incomplete_task(self, task_id: Union[int, str]) -> bool:
+        """Read-only recognition of a legacy or otherwise incomplete task dir."""
+        directory = self.task_dir(task_id)
+        if not directory.is_dir() or directory.is_symlink():
+            return False
+        return not (
+            self.task_path(task_id, "state.json").is_file()
+            and self.task_path(task_id, "task.json").is_file()
+        )
 
     def run_events_path(self, task_id: Union[int, str], run_number: int, run_kind: str) -> Path:
         if int(run_number) <= 0:
@@ -381,9 +436,246 @@ class TaskStore:
             return []
         return sorted(item.name for item in tasks_root.iterdir() if item.is_dir() and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", item.name))
 
+    def cleanup_stale_staging(self, *, max_age_seconds: float = 24 * 60 * 60) -> list[str]:
+        """Remove only old, directly-owned staging entries when it is safe."""
+        if max_age_seconds < 0:
+            raise ValueError("max_age_seconds must be non-negative")
+        tasks_root = self.root / "tasks"
+        if not tasks_root.is_dir():
+            return []
+        try:
+            entries = list(tasks_root.iterdir())
+        except OSError as exc:
+            logger.warning("stale task staging scan failed: %s", type(exc).__name__)
+            return []
+
+        now = time.time()
+        removed: list[str] = []
+        claims = [entry for entry in entries if self._CLAIM_NAME.fullmatch(entry.name) is not None]
+        ordered_entries = [
+            entry for entry in entries if self._STAGING_NAME.fullmatch(entry.name) is not None
+        ] + claims
+        for entry in ordered_entries:
+            is_staging = self._STAGING_NAME.fullmatch(entry.name) is not None
+            is_claim = self._CLAIM_NAME.fullmatch(entry.name) is not None
+            if not is_staging and not is_claim:
+                continue
+            if self._is_reparse_point(entry):
+                continue
+            try:
+                age = now - entry.stat().st_mtime
+            except OSError:
+                continue
+            if age < max_age_seconds:
+                continue
+            if is_claim:
+                pid = self._claim_pid(entry)
+                if pid is None or self._pid_is_alive(pid) is not False:
+                    continue
+                try:
+                    entry.unlink()
+                except OSError as exc:
+                    logger.warning("stale task claim cleanup failed: %s", type(exc).__name__)
+                    continue
+            else:
+                claim = self._claim_for_staging(entry, claims)
+                if claim is not None:
+                    if self._is_reparse_point(claim):
+                        continue
+                    pid = self._claim_pid(claim)
+                    if pid is None or self._pid_is_alive(pid) is not False:
+                        continue
+                if not entry.is_dir():
+                    continue
+                try:
+                    shutil.rmtree(entry)
+                except OSError as exc:
+                    logger.warning("stale task staging cleanup failed: %s", type(exc).__name__)
+                    continue
+            removed.append(entry.name)
+        return removed
+
     def next_execution_number(self) -> int:
         numbers = [int(item) for item in self.list_task_ids() if item.isdigit() and int(item) > 0]
         return max(numbers, default=0) + 1
+
+    def _create_task_atomic(self, task_id: str, files: dict[str, bytes]) -> None:
+        tasks_root = self.root / "tasks"
+        final_directory = tasks_root / task_id
+        claim_path = tasks_root / f".task-{task_id}.claim"
+        staging: Optional[Path] = None
+        claim_created = False
+        try:
+            tasks_root.mkdir(parents=True, exist_ok=True)
+            if final_directory.exists() or final_directory.is_symlink():
+                raise ValueError(f"task already exists: {task_id}")
+            try:
+                claim_fd = os.open(str(claim_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError as exc:
+                raise ValueError(f"task creation already in progress: {task_id}") from exc
+            claim_created = True
+            with os.fdopen(claim_fd, "w", encoding="ascii", newline="\n") as handle:
+                json.dump(
+                    {"pid": os.getpid(), "created_at": utc_now(), "owner": uuid.uuid4().hex},
+                    handle,
+                    separators=(",", ":"),
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            if final_directory.exists() or final_directory.is_symlink():
+                raise ValueError(f"task already exists: {task_id}")
+            self._cleanup_claim_owned_staging(task_id)
+            staging = Path(tempfile.mkdtemp(prefix=f".task-{task_id}-", suffix=".tmp", dir=str(tasks_root)))
+            for name in self._FILES:
+                self._write_staged_file(staging / name, files[name])
+
+            entries = list(staging.iterdir())
+            expected = set(self._FILES)
+            if len(entries) != len(expected) or {entry.name for entry in entries} != expected or any(not entry.is_file() for entry in entries):
+                raise RuntimeError("task staging set is incomplete")
+            try:
+                # On Windows os.rename does not replace an existing directory.
+                # The claim and the final existence checks close the cooperating
+                # process race without using an overwrite-capable operation.
+                os.rename(str(staging), str(final_directory))
+            except OSError as exc:
+                if final_directory.exists() or final_directory.is_symlink():
+                    raise ValueError(f"task already exists: {task_id}") from exc
+                raise
+            staging = None
+        finally:
+            if staging is not None:
+                self._cleanup_staging_path(staging)
+            if claim_created:
+                self._cleanup_claim_path(claim_path)
+
+    def _cleanup_claim_owned_staging(self, task_id: str, *, max_age_seconds: float = 24 * 60 * 60) -> None:
+        """Remove only old staging entries for a task whose claim we own."""
+        if max_age_seconds < 0:
+            raise ValueError("max_age_seconds must be non-negative")
+        tasks_root = self.root / "tasks"
+        prefix = f".task-{task_id}-"
+        try:
+            entries = list(tasks_root.iterdir())
+        except OSError as exc:
+            logger.warning("owned task staging scan failed: %s", type(exc).__name__)
+            return
+
+        now = time.time()
+        for entry in entries:
+            if not entry.name.startswith(prefix) or self._STAGING_NAME.fullmatch(entry.name) is None:
+                continue
+            if self._is_reparse_point(entry):
+                continue
+            try:
+                if now - entry.stat().st_mtime < max_age_seconds or not entry.is_dir():
+                    continue
+                shutil.rmtree(entry)
+            except OSError as exc:
+                logger.warning("owned task staging cleanup failed: %s", type(exc).__name__)
+
+    @staticmethod
+    def _write_staged_file(path: Path, data: bytes) -> None:
+        with path.open("xb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    @staticmethod
+    def _cleanup_staging_path(path: Path) -> None:
+        try:
+            if path.exists() and not path.is_symlink():
+                shutil.rmtree(path)
+        except Exception as exc:
+            logger.warning("task staging cleanup failed: %s", type(exc).__name__)
+
+    @staticmethod
+    def _cleanup_claim_path(path: Path) -> None:
+        try:
+            if path.exists() or path.is_symlink():
+                path.unlink()
+        except Exception as exc:
+            logger.warning("task claim cleanup failed: %s", type(exc).__name__)
+
+    @staticmethod
+    def _is_reparse_point(path: Path) -> bool:
+        try:
+            if path.is_symlink():
+                return True
+            attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+            return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+        except OSError:
+            return True
+
+    @staticmethod
+    def _claim_pid(path: Path) -> Optional[int]:
+        try:
+            payload = json.loads(path.read_text(encoding="ascii"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        pid = payload.get("pid") if isinstance(payload, dict) else None
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            return None
+        return pid
+
+    @staticmethod
+    def _claim_for_staging(staging: Path, claims: list[Path]) -> Optional[Path]:
+        prefix_matches = [
+            claim
+            for claim in claims
+            if staging.name.startswith(claim.name[: -len(".claim")] + "-")
+        ]
+        return max(prefix_matches, key=lambda path: len(path.name), default=None)
+
+    @staticmethod
+    def _pid_is_alive(pid: int) -> bool:
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            return False
+        if pid == os.getpid():
+            return True
+
+        if os.name != "nt":
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            except Exception:
+                return True
+            return True
+
+        process_query_limited_information = 0x1000
+        error_invalid_parameter = 87
+        still_active = 259
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+
+            handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+            if not handle:
+                return ctypes.get_last_error() != error_invalid_parameter
+            try:
+                exit_code = wintypes.DWORD()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return True
+                return exit_code.value == still_active
+            finally:
+                try:
+                    kernel32.CloseHandle(handle)
+                except Exception:
+                    pass
+        except Exception:
+            return True
 
     def _write_compat_files(self, task_id: str, state: dict[str, Any], *, task_yaml: Optional[str]) -> None:
         directory = self.task_dir(task_id)
@@ -441,6 +733,10 @@ class TaskStore:
         if not isinstance(value, dict):
             raise ValueError(f"task snapshot must be an object: {path.name}")
         return value
+
+    @staticmethod
+    def _json_bytes(value: dict[str, Any]) -> bytes:
+        return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8", "strict")
 
     @staticmethod
     def _write_json(path: Path, value: dict[str, Any]) -> None:

@@ -10,7 +10,7 @@ from ..collectors.artifact_collector import collect_artifacts
 from ..commands import run_registered_command
 from ..experiments.executor import ExperimentExecutor
 from ..executors.code import RuntimeCodeExecutor
-from ..security import SecurityError, ensure_safe_relative_path, resolve_under
+from ..security import SecurityError, ensure_safe_relative_path, resolve_under, validate_unicode_scalars
 from ..task_store import TaskStore, utc_now
 from ..worktree import WorktreeManager
 from .event_bus import TaskEventBus
@@ -54,6 +54,7 @@ class TaskSupervisor:
                 "experiment": ExperimentTaskHandler(self._experiment_executor),
             },
         )
+        self.store.cleanup_stale_staging()
         self.reconcile_task_events()
         self.recover_tasks()
 
@@ -378,8 +379,44 @@ class TaskSupervisor:
         return self.session_manager.get_catalog(worktree).public_dict()
 
     def close(self) -> None:
-        self.session_manager.close()
-        self.worker_queue.shutdown(wait=False, cancel_futures=True)
+        claimed = self.session_manager.begin_shutdown()
+        active_states = {SessionState.PREPARING.value, SessionState.RUNNING.value}
+        try:
+            for record in claimed:
+                if not self.store.exists(record.task_id):
+                    continue
+                snapshot = self.store.get_task(record.task_id)
+                if snapshot.get("task_type", "code") != "code":
+                    continue
+                current = str(snapshot.get("state", snapshot.get("status", "")))
+                if current not in active_states:
+                    continue
+                try:
+                    self._bus(record.task_id).transition(
+                        current,
+                        SessionState.INTERRUPTED.value,
+                        "bridge shutdown",
+                        updates={"review_ready": False},
+                    )
+                except InvalidTaskTransition:
+                    # EventBus re-reads under its task lock.  A valid terminal
+                    # transition won the durable race; never turn that race
+                    # into FAILED or resurrect an old active snapshot.
+                    latest = self.store.get_task(record.task_id)
+                    latest_state = str(latest.get("state", latest.get("status", "")))
+                    if latest_state in active_states:
+                        raise
+        finally:
+            # Durable runtime ownership is settled before local wakeup and
+            # before any client close.  The manager close is a local
+            # fail-safe for residual clients and non-runtime sessions.
+            self.session_manager.terminalize_shutdown(claimed)
+            try:
+                self.session_manager.close()
+            finally:
+                # Running workers are released by SessionRecord.completion;
+                # never wait unboundedly for unrelated queue jobs here.
+                self.worker_queue.shutdown(wait=False, cancel_futures=True)
 
     def _enqueue_code_task(self, request: TaskRequest, *, worktree: Optional[Path] = None) -> dict[str, Any]:
         TaskRouter.route(request)
@@ -510,6 +547,13 @@ class TaskSupervisor:
         metadata = dict(request.metadata or {})
         if request.command_id is not None:
             metadata["command_id"] = request.command_id
+        validate_unicode_scalars(
+            {
+                "task_id": task_id,
+                "request": vars(request),
+                "metadata": metadata,
+            }
+        )
         self.store.create_task(
             task_id,
             project=request.project,
