@@ -1,10 +1,33 @@
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any
 
 
 class SecurityError(ValueError):
     """Raised when a remote value crosses a local safety boundary."""
+
+
+def validate_unicode_scalars(value: Any, *, path: str = "input") -> None:
+    """Reject lone UTF-16 surrogate code points before serialization.
+
+    Python strings can contain surrogate code points even though they are not
+    valid Unicode scalar values.  Validate recursively at each input boundary
+    without stringifying unknown object types.
+    """
+
+    if isinstance(value, str):
+        if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+            raise SecurityError("input contains invalid Unicode scalar value")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            validate_unicode_scalars(item, path=f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            validate_unicode_scalars(key, path=f"{path}.key")
+            validate_unicode_scalars(item, path=f"{path}[value]")
 
 
 def ensure_safe_relative_path(value: str) -> str:
