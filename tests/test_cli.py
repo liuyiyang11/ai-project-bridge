@@ -1,9 +1,92 @@
 import json
+from types import SimpleNamespace
 
 from bridge.cli import main
 from bridge.cli import project_repository_checks, run_bridge
 from bridge.config import load_config
 from bridge.task_store import TaskStore
+
+
+class _FakeCliSupervisor:
+    def __init__(self, close_error=None):
+        self.close_calls = 0
+        self.close_error = close_error
+
+    def close(self):
+        self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class _FakeCliDispatcher:
+    def __init__(self, supervisor, outcome=None, error=None):
+        self.supervisor = supervisor
+        self.outcome = outcome if outcome is not None else []
+        self.error = error
+        self.run_once_calls = 0
+
+    def run_once(self):
+        self.run_once_calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.outcome
+
+
+def _cli_runtime_config(tmp_path):
+    return SimpleNamespace(
+        state_root=tmp_path / ".bridge",
+        codex=SimpleNamespace(backend="app-server"),
+        codex_binary="codex",
+        control_repo="owner/bridge",
+        poll_seconds=1,
+    )
+
+
+def _patch_cli_runtime(monkeypatch, dispatcher):
+    monkeypatch.setattr("bridge.cli.validate_project_repositories", lambda config: None)
+    monkeypatch.setattr("bridge.cli.make_github_client", lambda config: object())
+    monkeypatch.setattr("bridge.cli.Dispatcher", lambda *args, **kwargs: dispatcher)
+
+
+def test_cli_normal_exit_closes_supervisor(tmp_path, monkeypatch):
+    supervisor = _FakeCliSupervisor()
+    dispatcher = _FakeCliDispatcher(supervisor, outcome=[])
+    _patch_cli_runtime(monkeypatch, dispatcher)
+
+    assert run_bridge(_cli_runtime_config(tmp_path), once=True) == 0
+    assert supervisor.close_calls == 1
+
+
+def test_cli_run_once_closes_supervisor(tmp_path, monkeypatch):
+    supervisor = _FakeCliSupervisor()
+    dispatcher = _FakeCliDispatcher(supervisor, outcome=[])
+    _patch_cli_runtime(monkeypatch, dispatcher)
+    monkeypatch.setattr("bridge.cli.load_config", lambda config_path: _cli_runtime_config(tmp_path))
+
+    assert main(["run-once"]) == 0
+    assert supervisor.close_calls == 1
+
+
+def test_cli_keyboard_interrupt_closes_supervisor(tmp_path, monkeypatch, capsys):
+    supervisor = _FakeCliSupervisor()
+    dispatcher = _FakeCliDispatcher(supervisor, error=KeyboardInterrupt())
+    _patch_cli_runtime(monkeypatch, dispatcher)
+
+    assert run_bridge(_cli_runtime_config(tmp_path), once=False) == 0
+    assert supervisor.close_calls == 1
+    assert "Bridge stopped." in capsys.readouterr().out
+
+
+def test_cli_exception_closes_supervisor_and_preserves_primary_error(tmp_path, monkeypatch, capsys):
+    supervisor = _FakeCliSupervisor(close_error=RuntimeError("shutdown boom"))
+    dispatcher = _FakeCliDispatcher(supervisor, error=RuntimeError("runtime boom"))
+    _patch_cli_runtime(monkeypatch, dispatcher)
+
+    assert run_bridge(_cli_runtime_config(tmp_path), once=False) == 1
+    assert supervisor.close_calls == 1
+    error = capsys.readouterr().err
+    assert "Bridge error: runtime boom" in error
+    assert "Bridge shutdown error: shutdown boom" in error
 
 
 def test_show_task_prints_persisted_state(tmp_path, capsys):

@@ -237,6 +237,19 @@ def test_supervisor_close_interrupts_active_runtime_task_and_wakes_worker() -> N
         assert runtime.store.get_task(runtime.task_id)["state"] != SessionState.FAILED.value
 
 
+def test_direct_session_manager_close_only_terminalizes_local_runtime() -> None:
+    with _active_runtime() as runtime:
+        record, future = _await_active(runtime)
+
+        runtime.manager.close()
+
+        assert record.state == SessionState.INTERRUPTED
+        assert runtime.store.get_task(runtime.task_id)["state"] == SessionState.RUNNING.value
+        assert record.completion.is_set() is True
+        assert runtime.fake.close_called is True
+        future.result(timeout=0.25)
+
+
 def test_shutdown_terminal_state_rejects_late_turn_completion() -> None:
     with _active_runtime() as runtime:
         record, future = _await_active(runtime)

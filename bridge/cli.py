@@ -230,15 +230,28 @@ def run_bridge(config, *, once: bool) -> int:
             runner = CodexRunner(config.codex_binary)
             session_manager = None
         dispatcher = Dispatcher(config, github, store=store, runner=runner, session_manager=session_manager)
-        if once:
-            print(json.dumps(dispatcher.run_once(), ensure_ascii=False, indent=2))
-            return 0
-        print(f"Bridge polling {config.control_repo} every {config.poll_seconds}s. Press Ctrl+C to stop.")
-        while True:
-            outcomes = dispatcher.run_once()
-            if outcomes:
-                print(json.dumps(outcomes, ensure_ascii=False, indent=2))
-            time.sleep(config.poll_seconds)
+        supervisor = dispatcher.supervisor
+        primary_error: Optional[BaseException] = None
+        try:
+            if once:
+                print(json.dumps(dispatcher.run_once(), ensure_ascii=False, indent=2))
+                return 0
+            print(f"Bridge polling {config.control_repo} every {config.poll_seconds}s. Press Ctrl+C to stop.")
+            while True:
+                outcomes = dispatcher.run_once()
+                if outcomes:
+                    print(json.dumps(outcomes, ensure_ascii=False, indent=2))
+                time.sleep(config.poll_seconds)
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            try:
+                supervisor.close()
+            except BaseException as close_error:
+                if primary_error is None:
+                    raise
+                print(f"Bridge shutdown error: {close_error}", file=sys.stderr)
     except KeyboardInterrupt:
         print("Bridge stopped.")
         return 0
