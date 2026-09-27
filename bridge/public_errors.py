@@ -25,6 +25,8 @@ CODEX_START_FAILED = "CODEX_START_FAILED"
 CODEX_RUNTIME_FAILED = "CODEX_RUNTIME_FAILED"
 PERSISTENCE_FAILED = "PERSISTENCE_FAILED"
 INTERNAL_ERROR = "INTERNAL_ERROR"
+MARKET_DATA_TIMEOUT = "MARKET_DATA_TIMEOUT"
+MARKET_DATA_SOURCE_FAILED = "MARKET_DATA_SOURCE_FAILED"
 
 _KNOWN_CODES = frozenset(
     {
@@ -37,6 +39,8 @@ _KNOWN_CODES = frozenset(
         CODEX_RUNTIME_FAILED,
         PERSISTENCE_FAILED,
         INTERNAL_ERROR,
+        MARKET_DATA_TIMEOUT,
+        MARKET_DATA_SOURCE_FAILED,
     }
 )
 _PROJECT_NOT_FOUND = re.compile(r"^project is not registered:\s*([A-Za-z0-9][A-Za-z0-9._-]{0,127})\s*\Z", re.IGNORECASE)
@@ -109,6 +113,8 @@ def _canonical_message(error_code: str) -> str:
         CODEX_RUNTIME_FAILED: "The Codex task failed.",
         PERSISTENCE_FAILED: "The task could not be saved safely.",
         INTERNAL_ERROR: "The task failed unexpectedly. Check local Bridge developer logs.",
+        MARKET_DATA_TIMEOUT: "Market data request timed out.",
+        MARKET_DATA_SOURCE_FAILED: "Market data source is temporarily unavailable.",
     }.get(error_code, "The task failed unexpectedly. Check local Bridge developer logs.")
 
 
@@ -119,6 +125,8 @@ def _public_message_for_code(error_code: str, message: Any) -> str:
     if candidate == _canonical_message(error_code):
         return candidate
     if error_code == CODEX_RUNTIME_FAILED and candidate == "The Codex task timed out.":
+        return candidate
+    if error_code == INVALID_REQUEST and candidate == "Invalid A-share symbol.":
         return candidate
     if error_code == PROJECT_NOT_FOUND:
         if _PUBLIC_PROJECT_NOT_FOUND.fullmatch(candidate):
@@ -170,6 +178,8 @@ def public_error_from_message(message: Any, *, default_code: str = INTERNAL_ERRO
         return PublicError(COMMAND_FAILED, _public_message_for_code(COMMAND_FAILED, candidate))
     if candidate == "input contains invalid Unicode scalar value":
         return PublicError(INVALID_REQUEST, candidate)
+    if candidate == "Invalid A-share symbol.":
+        return PublicError(INVALID_REQUEST, candidate)
     lowered = candidate.casefold()
     if "timed out" in lowered or "timeout" in lowered:
         if "codex" in lowered or "app-server" in lowered or "task turn" in lowered:
@@ -198,6 +208,11 @@ def public_error_from_exception(error: BaseException, *, context: Optional[str] 
     raw = str(error)
     lowered = raw.casefold()
     context_value = (context or "").casefold()
+
+    market_code = getattr(error, "public_error_code", None)
+    market_message = getattr(error, "public_message", None)
+    if market_code in {INVALID_REQUEST, MARKET_DATA_TIMEOUT, MARKET_DATA_SOURCE_FAILED}:
+        return PublicError(market_code, market_message)
 
     if name == "SecurityError":
         if raw == "input contains invalid Unicode scalar value":

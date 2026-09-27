@@ -102,6 +102,29 @@ class ProjectConfig(BaseModel):
         return values
 
 
+class MarketDataConfig(BaseModel):
+    """Local-only configuration for the synchronous stock-data fast path."""
+
+    class Config:
+        extra = "forbid"
+
+    enabled: bool = False
+    root: Optional[Path] = None
+    python_executable: Optional[Path] = None
+    default_timeout_seconds: int = Field(default=30, ge=1, le=120)
+
+    @root_validator(skip_on_failure=True)
+    def enabled_requires_local_paths(cls, values: dict) -> dict:
+        if values.get("enabled"):
+            root = values.get("root")
+            python_executable = values.get("python_executable")
+            if root is None or python_executable is None:
+                raise ValueError("enabled market_data requires root and python_executable")
+            if not root.is_absolute() or not python_executable.is_absolute():
+                raise ValueError("enabled market_data requires absolute local paths")
+        return values
+
+
 class BundleLimits(BaseModel):
     class Config:
         extra = "forbid"
@@ -142,6 +165,7 @@ class BridgeConfig(BaseModel):
     gh_binary: str = "gh"
     codex_binary: str = "codex"
     python_executable: Optional[Path] = None
+    market_data: Optional[MarketDataConfig] = None
     config_path: Path = Field(default=Path("config.local.yaml"), exclude=True)
 
     @validator("control_repo")
@@ -203,4 +227,9 @@ def load_config(path: Union[str, Path] = "config.local.yaml") -> BridgeConfig:
         project.root = project.root.expanduser().resolve()
     if config.python_executable is not None:
         config.python_executable = config.python_executable.expanduser().resolve()
+    if config.market_data is not None:
+        if config.market_data.root is not None:
+            config.market_data.root = config.market_data.root.expanduser().resolve()
+        if config.market_data.python_executable is not None:
+            config.market_data.python_executable = config.market_data.python_executable.expanduser().resolve()
     return config

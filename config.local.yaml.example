@@ -7,7 +7,7 @@ poll_seconds: 30
 codex:
   backend: app-server
   routing_policy: inherit
-python_executable: 'C:\Users\29833\.conda\envs\py10\python.exe'
+# Set python_executable only in ignored config.local.yaml when needed.
 
 limits:
   max_artifact_file_mb: 25
@@ -36,4 +36,10 @@ projects:
     base_branch: main
     allowed_commands: {}
     artifact_dirs: []
+
+market_data:
+  enabled: false
+  root: null
+  python_executable: null
+  default_timeout_seconds: 30
 

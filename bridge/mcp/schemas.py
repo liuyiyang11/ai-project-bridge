@@ -92,3 +92,9 @@ class TaskArtifactsInput(StrictModel):
     limit: conint(strict=True, ge=1, le=1000) = 100
 
     _safe_id = validator("task_id", allow_reuse=True)(_safe_task_id)
+
+
+class MarketSnapshotInput(StrictModel):
+    symbol: StrictStr = Field(min_length=1, max_length=32)
+    days: conint(strict=True, ge=1, le=250) = 20
+    adjust: Literal["qfq", "hfq", "none"] = "qfq"

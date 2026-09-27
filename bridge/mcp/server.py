@@ -81,10 +81,18 @@ class McpStdioServer:
                 }
             except McpToolError as exc:
                 public = public_error_from_exception(exc, context="mcp")
-                result = {
-                    "content": [{"type": "text", "text": public.message}],
-                    "isError": True,
-                }
+                if exc.public_error is not None:
+                    public_payload = exc.public_error.as_dict()
+                    result = {
+                        "content": [{"type": "text", "text": json.dumps(public_payload, ensure_ascii=False)}],
+                        "structuredContent": public_payload,
+                        "isError": True,
+                    }
+                else:
+                    result = {
+                        "content": [{"type": "text", "text": public.message}],
+                        "isError": True,
+                    }
             except Exception as exc:
                 logging.getLogger(__name__).error(
                     "MCP request failed error_type=%s",

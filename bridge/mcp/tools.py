@@ -14,6 +14,8 @@ from ..public_errors import (
     sanitize_public_status,
 )
 from ..security import validate_unicode_scalars
+from ..market_data import MarketDataService
+from ..market_data.errors import MarketDataRequestError, MarketDataSourceError, MarketDataTimeoutError
 from .schemas import (
     EmptyInput,
     StartCodeInput,
@@ -23,18 +25,23 @@ from .schemas import (
     TaskControlInput,
     TaskEventsInput,
     TaskStatusInput,
+    MarketSnapshotInput,
 )
 
 
 class McpToolError(ValueError):
     """A safe, caller-facing MCP tool validation or execution error."""
 
+    def __init__(self, message: str, *, public_error: Any = None):
+        super().__init__(message)
+        self.public_error = public_error
+
 
 logger = logging.getLogger(__name__)
 
 
 class BridgeMcpTools:
-    """The nine local Bridge tools exposed by the stdio adapter."""
+    """The local Bridge tools exposed by the stdio adapter."""
 
     _SCHEMAS: dict[str, Type[BaseModel]] = {
         "bridge_list_projects": EmptyInput,
@@ -46,12 +53,20 @@ class BridgeMcpTools:
         "bridge_task_events": TaskEventsInput,
         "bridge_control_task": TaskControlInput,
         "bridge_task_artifacts": TaskArtifactsInput,
+        "bridge_market_snapshot": MarketSnapshotInput,
     }
 
-    def __init__(self, config: Any = None, *, supervisor: Optional[TaskSupervisor] = None):
+    def __init__(
+        self,
+        config: Any = None,
+        *,
+        supervisor: Optional[TaskSupervisor] = None,
+        market_data_service: Optional[MarketDataService] = None,
+    ):
         if supervisor is None and config is None:
             raise ValueError("config or supervisor is required")
         self.supervisor = supervisor or TaskSupervisor(config)
+        self.market_data_service = market_data_service or MarketDataService(getattr(config, "market_data", None))
 
     @classmethod
     def definitions(cls) -> list[dict[str, Any]]:
@@ -65,6 +80,11 @@ class BridgeMcpTools:
             "bridge_task_events": "Read a bounded incremental safe event stream for a Bridge task.",
             "bridge_control_task": "Steer, interrupt, continue, or accept a Bridge task.",
             "bridge_task_artifacts": "Read a bounded artifact manifest for a Bridge task.",
+            "bridge_market_snapshot": (
+                "Deterministic, synchronous, read-only fast path for one A-share quote and recent daily K-lines. "
+                "Uses the configured a-stock-data adapter in one bounded Python subprocess, returns public-safe "
+                "structured data, does not start a Codex task or enter WorkerQueue, and provides no investment advice."
+            ),
         }
         return [
             {"name": name, "description": descriptions[name], "inputSchema": schema.schema()}
@@ -79,6 +99,8 @@ class BridgeMcpTools:
             value = schema.parse_obj(arguments or {})
         except ValidationError as exc:
             public = public_error_from_exception(exc, context="mcp")
+            if schema is MarketSnapshotInput:
+                raise McpToolError(public.message, public_error=public) from None
             raise McpToolError(public.message) from None
         try:
             validate_unicode_scalars(self._model_values(value))
@@ -95,6 +117,8 @@ class BridgeMcpTools:
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
             public = public_error_from_exception(exc, context="mcp")
+            if isinstance(exc, (MarketDataRequestError, MarketDataTimeoutError, MarketDataSourceError)):
+                raise McpToolError(public.message, public_error=public) from None
             raise McpToolError(public.message) from None
 
     def bridge_list_projects(self, value: EmptyInput) -> dict[str, Any]:
@@ -145,6 +169,9 @@ class BridgeMcpTools:
 
     def bridge_task_artifacts(self, value: TaskArtifactsInput) -> dict[str, Any]:
         return {"task_id": value.task_id, "artifacts": self.supervisor.task_artifacts(value.task_id, kind=value.kind, limit=value.limit)}
+
+    def bridge_market_snapshot(self, value: MarketSnapshotInput) -> dict[str, Any]:
+        return self.market_data_service.snapshot(value.symbol, value.days, value.adjust)
 
     @staticmethod
     def _model_values(value: BaseModel) -> Any:
