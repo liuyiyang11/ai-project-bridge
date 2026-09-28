@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import io
 import json
+import math
 import os
 import re
 import ssl
@@ -224,6 +225,53 @@ def _argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _latest_none_reference(namespace: dict[str, Any], code: str) -> dict[str, Any] | None:
+    """Fetch a small, independently validated unadjusted daily reference."""
+    # Keep this optional request bounded across all Tencent fallback hosts. It
+    # runs only after the requested daily series has completed.
+    original_http = namespace["_v39_http"]
+
+    def bounded_http(url, *args, **kwargs):
+        kwargs["timeout"] = (2, 3)
+        return original_http(url, *args, **kwargs)
+
+    namespace["_v39_http"] = bounded_http
+    try:
+        frame = namespace["tencent_kline"](code, period="day", adjust="", count=2)
+    except Exception:
+        return None
+    finally:
+        namespace["_v39_http"] = original_http
+
+    try:
+        required = {"date", "open", "high", "low", "close", "volume", "source"}
+        if frame is None or not hasattr(frame, "columns") or not required.issubset(frame.columns) or frame.empty:
+            return None
+        if {str(source) for source in frame["source"].dropna().unique()} != {"tencent"}:
+            return None
+        raw = frame.tail(1).to_dict(orient="records")[0]
+        day = raw["date"]
+        if not isinstance(day, str) or date.fromisoformat(day).isoformat() != day:
+            return None
+        bar: dict[str, Any] = {"date": day}
+        for field in ("open", "high", "low", "close", "volume"):
+            value = raw[field]
+            item = getattr(value, "item", None)
+            value = item() if callable(item) else value
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                return None
+            bar[field] = value
+        if min(bar[field] for field in ("open", "high", "low", "close")) <= 0:
+            return None
+        if bar["high"] < bar["low"] or bar["volume"] < 0:
+            return None
+        return {"source": "tencent", "adjust": "none", "bar": bar}
+    except Exception:
+        # Reference validation is enrichment; no malformed source object may
+        # turn a successful requested snapshot into a public tool error.
+        return None
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if not _SYMBOL.fullmatch(args.symbol) or not 1 <= args.days <= 250:
         raise ValueError("invalid request")
@@ -239,6 +287,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     started = time.perf_counter()
     namespace = _load_functions(args.repo_root)
+    reference_namespace = None
+    if args.adjust == "qfq":
+        try:
+            # The published helper keeps mutable host fallback state in its
+            # globals. A separate namespace lets both K-line calls overlap.
+            reference_namespace = _load_functions(args.repo_root)
+        except Exception:
+            pass  # Optional quality enrichment must not fail the snapshot.
     code = namespace["norm_ticker"](args.symbol, stock_only=True)
     setup_ms = round((time.perf_counter() - started) * 1000, 3)
 
@@ -259,13 +315,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         elapsed_ms = round((time.perf_counter() - kline_started) * 1000, 3)
         return value, elapsed_ms
 
-    # Both published functions are read-only and use separate endpoints; one child
-    # process can overlap the network waits without starting a second interpreter.
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    def fetch_reference() -> tuple[dict[str, Any] | None, float]:
+        reference_started = time.perf_counter()
+        value = _latest_none_reference(reference_namespace, code)
+        elapsed_ms = round((time.perf_counter() - reference_started) * 1000, 3)
+        return value, elapsed_ms
+
+    # The optional reference overlaps source waits without a second process.
+    with ThreadPoolExecutor(max_workers=3 if reference_namespace is not None else 2) as pool:
         quote_future = pool.submit(fetch_quote)
         kline_future = pool.submit(fetch_kline)
+        reference_future = pool.submit(fetch_reference) if reference_namespace is not None else None
         quote, quote_ms = quote_future.result()
         frame, kline_ms = kline_future.result()
+        try:
+            none_reference, reference_ms = reference_future.result() if reference_future is not None else (None, 0.0)
+        except Exception:
+            none_reference, reference_ms = None, 0.0
 
     required_columns = {"date", "open", "high", "low", "close", "volume", "source"}
     if frame is None or frame.empty or not required_columns.issubset(frame.columns):
@@ -304,12 +370,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "name": quote["name"],
         "quote": quote,
         "daily_kline": rows,
+        "_none_reference": none_reference,
         "adjust": args.adjust,
         "data_source": {"quote": "tencent", "daily_kline": "tencent"},
         "retrieved_at": retrieved_at.isoformat(),
         "quote_timestamp": _exact_quote_timestamp(quote.get("quote_timestamp")),
         **market_context,
-        "_timings_ms": {"adapter_setup": setup_ms, "quote": quote_ms, "daily_kline": kline_ms},
+        "_timings_ms": {"adapter_setup": setup_ms, "quote": quote_ms, "daily_kline": kline_ms,
+                        "reference": reference_ms},
         "warnings": [],
     }
 

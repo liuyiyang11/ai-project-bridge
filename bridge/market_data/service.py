@@ -10,6 +10,7 @@ import re
 import subprocess
 import time
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -32,7 +33,9 @@ _QUOTE_FIELDS = {
     "amount_wan": "amount_wan",
 }
 _BAR_FIELDS = ("open", "high", "low", "close", "volume")
+_PRICE_FIELDS = ("open", "high", "low", "close")
 _CN_TZ = timezone(timedelta(hours=8))
+_QFQ_WARNING = "Latest qfq daily bar is inconsistent with the unadjusted latest-price reference."
 
 
 class MarketDataService:
@@ -229,6 +232,42 @@ class MarketDataService:
                 else None
             )
             daily_kline_last_date = daily_kline[-1]["date"]
+            reference = self._optional_none_reference(payload.get("_none_reference")) if adjust == "qfq" else None
+            reference_date = reference["date"] if reference is not None else None
+            freshness_status = (
+                "UNKNOWN" if expected_trade_date is None
+                else "VERIFIED" if daily_kline_last_date == expected_trade_date
+                else "MISMATCH"
+            )
+            quality_status = "UNVERIFIED"
+            max_abs_diff: float | None = None
+            fields_different: list[str] = []
+            latest_price_bar: dict[str, Any] | None = None
+            if adjust == "qfq":
+                if reference_date == daily_kline_last_date and freshness_status != "MISMATCH":
+                    latest_price_bar = self._exact_price_bar(reference)
+                    max_abs_diff, fields_different = self._price_differences(daily_kline[-1], reference)
+                    quality_status = "INCONSISTENT" if fields_different else "CONSISTENT"
+            elif adjust == "none":
+                if freshness_status != "MISMATCH":
+                    latest_price_bar = self._exact_price_bar(daily_kline[-1])
+                if freshness_status == "VERIFIED":
+                    quality_status = "CONSISTENT"
+
+            exact_price_safe: bool | None = (
+                False if quality_status == "INCONSISTENT" or freshness_status == "MISMATCH" or adjust == "hfq"
+                else True if quality_status == "CONSISTENT" and freshness_status == "VERIFIED"
+                else None
+            )
+            latest_daily_quality = {
+                "status": quality_status,
+                "exact_price_safe": exact_price_safe,
+                "freshness_status": freshness_status,
+                "qfq_date": daily_kline_last_date if adjust == "qfq" else None,
+                "reference_date": reference_date if adjust == "qfq" else daily_kline_last_date if adjust == "none" else None,
+                "max_abs_diff": max_abs_diff,
+                "fields_different": fields_different,
+            }
             quote_stale = (
                 quote_date < expected_trade_date
                 if quote_date is not None and expected_trade_date is not None
@@ -251,13 +290,16 @@ class MarketDataService:
                 warnings.append("quote is behind the latest expected trading date")
             if date_consistent is False:
                 warnings.append("quote and daily K-line dates do not match")
+            if quality_status == "INCONSISTENT":
+                warnings.append(_QFQ_WARNING)
 
             timings = payload.get("_timings_ms")
             if not isinstance(timings, dict):
                 raise ValueError("missing timings")
             quote_ms = self._finite_number(timings.get("quote"))
             kline_ms = self._finite_number(timings.get("daily_kline"))
-            if quote_ms < 0 or kline_ms < 0:
+            reference_ms = self._finite_number(timings.get("reference", 0.0))
+            if quote_ms < 0 or kline_ms < 0 or reference_ms < 0:
                 raise ValueError("invalid timings")
 
             return {
@@ -265,6 +307,8 @@ class MarketDataService:
                 "name": name,
                 "quote": quote,
                 "daily_kline": daily_kline,
+                "latest_price_bar": latest_price_bar,
+                "data_quality": {"latest_daily_bar": latest_daily_quality},
                 "adjust": adjust,
                 "data_source": {"quote": "tencent", "daily_kline": "tencent"},
                 "retrieved_at": parsed_time.isoformat(),
@@ -278,12 +322,60 @@ class MarketDataService:
                     "daily_kline_stale": daily_kline_stale,
                     "date_consistent": date_consistent,
                 },
-                "latency_ms": {"quote": quote_ms, "daily_kline": kline_ms},
+                "latency_ms": {"quote": quote_ms, "daily_kline": kline_ms, "reference": reference_ms},
                 "warnings": warnings,
             }
         except (KeyError, TypeError, ValueError, OverflowError):
             logger.warning("market data subprocess output failed validation")
             raise MarketDataSourceError() from None
+
+    @classmethod
+    def _optional_none_reference(cls, raw: Any) -> dict[str, Any] | None:
+        """Allowlist optional source data; a bad reference cannot fail the snapshot."""
+        if not isinstance(raw, dict) or raw.get("source") != "tencent" or raw.get("adjust") != "none":
+            return None
+        bar = raw.get("bar")
+        if not isinstance(bar, dict):
+            return None
+        try:
+            day = bar.get("date")
+            if not isinstance(day, str) or date.fromisoformat(day).isoformat() != day:
+                return None
+            result: dict[str, Any] = {"date": day}
+            for field in _BAR_FIELDS:
+                result[field] = cls._finite_number(bar[field])
+            if (min(result[field] for field in _PRICE_FIELDS) <= 0
+                    or result["high"] < result["low"] or result["volume"] < 0):
+                return None
+            return result
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+
+    @staticmethod
+    def _exact_price_bar(bar: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "date": bar["date"],
+            **{field: bar[field] for field in _BAR_FIELDS},
+            "adjust": "none",
+            "role": "EXACT_LATEST_PRICE_REFERENCE",
+            "source": "tencent",
+        }
+
+    @staticmethod
+    def _price_differences(bar: dict[str, Any], reference: dict[str, Any]) -> tuple[float, list[str]]:
+        """Compare at a fraction of the observed decimal quantum, above float noise."""
+        max_diff = Decimal(0)
+        different: list[str] = []
+        for field in _PRICE_FIELDS:
+            actual = Decimal(str(bar[field]))
+            expected = Decimal(str(reference[field]))
+            quantum = Decimal(1).scaleb(min(0, actual.as_tuple().exponent, expected.as_tuple().exponent))
+            tolerance = max(Decimal("1e-12"), quantum / 4)
+            diff = abs(actual - expected)
+            max_diff = max(max_diff, diff)
+            if diff > tolerance:
+                different.append(field)
+        return float(max_diff), different
 
     @staticmethod
     def _finite_number(value: Any) -> float:

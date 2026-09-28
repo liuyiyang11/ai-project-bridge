@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import subprocess
 import calendar
+from argparse import Namespace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from bridge.config import BridgeConfig, MarketDataConfig, load_config
+from bridge.market_data import adapter as market_adapter
 from bridge.market_data.adapter import _resolve_market_context
 from bridge.market_data.service import MarketDataService
 from bridge.mcp.server import McpStdioServer
@@ -147,7 +150,8 @@ def test_market_snapshot_one_explicit_bounded_subprocess_and_public_shape(tmp_pa
     assert result["adjust"] == "none"
     assert result["data_source"] == {"quote": "tencent", "daily_kline": "tencent"}
     assert set(result) == {
-        "symbol", "name", "quote", "daily_kline", "adjust", "data_source", "retrieved_at",
+        "symbol", "name", "quote", "daily_kline", "latest_price_bar", "data_quality",
+        "adjust", "data_source", "retrieved_at",
         "market_date", "quote_timestamp", "daily_kline_last_date", "expected_latest_trade_date",
         "market_status", "data_freshness", "latency_ms", "warnings",
     }
@@ -158,6 +162,237 @@ def test_market_snapshot_one_explicit_bounded_subprocess_and_public_shape(tmp_pa
         "daily_kline_stale": False,
         "date_consistent": None,
     }
+    assert result["latest_price_bar"] == {
+        **payload["daily_kline"][0],
+        "adjust": "none", "role": "EXACT_LATEST_PRICE_REFERENCE", "source": "tencent",
+    }
+    assert result["data_quality"]["latest_daily_bar"]["status"] == "CONSISTENT"
+    assert result["data_quality"]["latest_daily_bar"]["exact_price_safe"] is True
+
+
+def _quality_payload(*, adjust: str = "qfq") -> dict:
+    payload = _payload("560780", adjust=adjust)
+    prior = {"date": "2026-09-24", "open": 1.05, "high": 1.058,
+             "low": 1.032, "close": 1.032, "volume": 3656727.0}
+    latest = {"date": "2026-09-28", "open": 1.022, "high": 1.038,
+              "low": 0.984, "close": 0.988, "volume": 5846140.0}
+    payload["daily_kline"] = [prior, dict(latest)]
+    payload["_none_reference"] = {"source": "tencent", "adjust": "none", "bar": dict(latest)}
+    payload["retrieved_at"] = "2026-09-28T08:10:00+00:00"
+    payload["market_date"] = "2026-09-28"
+    payload["expected_latest_trade_date"] = "2026-09-28"
+    return payload
+
+
+def _quality_snapshot(tmp_path: Path, payload: dict) -> dict:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    service = MarketDataService(
+        _config(tmp_path),
+        runner=lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, json.dumps(payload, ensure_ascii=False), ""
+        ),
+    )
+    return service.snapshot(payload["symbol"], 20, payload["adjust"])
+
+
+def test_qfq_matching_reference_marks_latest_price_safe(tmp_path):
+    result = _quality_snapshot(tmp_path, _quality_payload())
+
+    quality = result["data_quality"]["latest_daily_bar"]
+    assert quality == {
+        "status": "CONSISTENT", "exact_price_safe": True, "freshness_status": "VERIFIED",
+        "qfq_date": "2026-09-28", "reference_date": "2026-09-28",
+        "max_abs_diff": 0.0, "fields_different": [],
+    }
+    assert result["latest_price_bar"]["adjust"] == "none"
+    assert result["latest_price_bar"]["close"] == 0.988
+    assert result["warnings"] == []
+
+
+def test_qfq_inconsistent_reference_preserves_source_series_and_warns(tmp_path):
+    payload = _quality_payload()
+    payload["daily_kline"][-1].update(open=1.02, high=1.04, low=0.98, close=0.99)
+
+    result = _quality_snapshot(tmp_path, payload)
+
+    quality = result["data_quality"]["latest_daily_bar"]
+    assert result["daily_kline"] == payload["daily_kline"]
+    assert result["latest_price_bar"] == {
+        **payload["_none_reference"]["bar"],
+        "adjust": "none", "role": "EXACT_LATEST_PRICE_REFERENCE", "source": "tencent",
+    }
+    assert quality["status"] == "INCONSISTENT"
+    assert quality["exact_price_safe"] is False
+    assert quality["max_abs_diff"] == 0.004
+    assert quality["fields_different"] == ["open", "high", "low", "close"]
+    assert len(result["warnings"]) == 1
+    assert "inconsistent" in result["warnings"][0]
+
+
+def test_qfq_one_observed_tick_is_detected(tmp_path):
+    payload = _quality_payload()
+    payload["daily_kline"][-1]["low"] = 0.985
+
+    quality = _quality_snapshot(tmp_path, payload)["data_quality"]["latest_daily_bar"]
+
+    assert quality["status"] == "INCONSISTENT"
+    assert quality["fields_different"] == ["low"]
+    assert quality["max_abs_diff"] == 0.001
+
+
+def test_qfq_missing_or_misaligned_reference_is_unverified(tmp_path):
+    missing = _quality_payload()
+    missing["_none_reference"] = None
+    result = _quality_snapshot(tmp_path / "missing", missing)
+    quality = result["data_quality"]["latest_daily_bar"]
+    assert quality["status"] == "UNVERIFIED"
+    assert quality["exact_price_safe"] is None
+    assert result["latest_price_bar"] is None
+
+    mismatched = _quality_payload()
+    mismatched["_none_reference"]["bar"]["date"] = "2026-09-24"
+    result = _quality_snapshot(tmp_path / "mismatched", mismatched)
+    quality = result["data_quality"]["latest_daily_bar"]
+    assert quality["status"] == "UNVERIFIED"
+    assert quality["reference_date"] == "2026-09-24"
+    assert quality["max_abs_diff"] is None
+    assert result["latest_price_bar"] is None
+
+
+def test_qfq_calendar_unavailable_preserves_price_result_but_unknown_freshness(tmp_path):
+    payload = _quality_payload()
+    payload["expected_latest_trade_date"] = None
+    payload["market_status"] = "UNKNOWN"
+
+    result = _quality_snapshot(tmp_path, payload)
+
+    quality = result["data_quality"]["latest_daily_bar"]
+    assert quality["status"] == "CONSISTENT"
+    assert quality["freshness_status"] == "UNKNOWN"
+    assert quality["exact_price_safe"] is None
+    assert result["latest_price_bar"]["close"] == 0.988
+
+
+def test_qfq_stale_date_is_not_compared_even_with_same_date_reference(tmp_path):
+    payload = _quality_payload()
+    payload["retrieved_at"] = "2026-09-29T08:10:00+00:00"
+    payload["market_date"] = "2026-09-29"
+    payload["expected_latest_trade_date"] = "2026-09-29"
+
+    result = _quality_snapshot(tmp_path, payload)
+
+    quality = result["data_quality"]["latest_daily_bar"]
+    assert quality["status"] == "UNVERIFIED"
+    assert quality["freshness_status"] == "MISMATCH"
+    assert quality["exact_price_safe"] is False
+    assert quality["max_abs_diff"] is None
+    assert result["latest_price_bar"] is None
+
+
+def test_none_and_hfq_do_not_apply_qfq_comparison(tmp_path):
+    for adjust in ("none", "hfq"):
+        payload = _quality_payload(adjust=adjust)
+        payload["_none_reference"]["bar"]["low"] = 0.1
+        result = _quality_snapshot(tmp_path / adjust, payload)
+        quality = result["data_quality"]["latest_daily_bar"]
+        assert quality["fields_different"] == []
+        assert quality["max_abs_diff"] is None
+        assert result["warnings"] == []
+        if adjust == "none":
+            assert quality["status"] == "CONSISTENT"
+            assert quality["exact_price_safe"] is True
+            assert result["latest_price_bar"]["low"] == 0.984
+        else:
+            assert quality["status"] == "UNVERIFIED"
+            assert quality["exact_price_safe"] is False
+            assert result["latest_price_bar"] is None
+
+
+def test_malicious_optional_reference_is_not_forwarded(tmp_path):
+    payload = _quality_payload()
+    payload["_none_reference"]["bar"].update(
+        low=_SECRET_TOKEN, cookie="session-cookie-secret", path=_SECRET_PATH,
+    )
+    result = _quality_snapshot(tmp_path, payload)
+    public = json.dumps(result, ensure_ascii=False)
+
+    assert result["data_quality"]["latest_daily_bar"]["status"] == "UNVERIFIED"
+    assert result["latest_price_bar"] is None
+    for secret in (_SECRET_TOKEN, "session-cookie-secret", _SECRET_PATH):
+        assert secret not in public
+
+
+def _fake_adapter_namespace(calls: list, *, reference_timeout: bool = False) -> dict:
+    source = _quality_payload()
+    namespace = {"norm_ticker": lambda symbol, stock_only: symbol, "_v39_http": lambda *a, **k: None}
+
+    def kline(code, *, period, adjust, count):
+        calls.append((code, period, adjust, count))
+        if adjust == "" and reference_timeout:
+            raise TimeoutError(f"private reference error {_SECRET_TOKEN}")
+        row = source["_none_reference"]["bar"] if adjust == "" else source["daily_kline"][-1]
+        return pd.DataFrame([{**row, "source": "tencent", "source_url": _SECRET_PATH}])
+
+    namespace["tencent_kline"] = kline
+    namespace["tencent_quote"] = lambda codes: {codes[0]: {**source["quote"], "is_stale": False}}
+    return namespace
+
+
+def test_optional_reference_timeout_does_not_fail_adapter_or_snapshot(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(market_adapter, "_load_functions", lambda root: _fake_adapter_namespace(
+        calls, reference_timeout=True
+    ))
+    monkeypatch.setattr(market_adapter, "_load_trading_calendar", lambda root: (_ for _ in ()).throw(
+        RuntimeError("calendar unavailable")
+    ))
+
+    payload = market_adapter.run(Namespace(repo_root=tmp_path, symbol="560780", days=20, adjust="qfq"))
+    result = MarketDataService(_config(tmp_path))._normalize(
+        payload, symbol="560780", days=20, adjust="qfq"
+    )
+
+    assert len(calls) == 2
+    assert set(calls) == {("560780", "day", "qfq", 20), ("560780", "day", "", 2)}
+    assert payload["_none_reference"] is None
+    assert result["daily_kline"][-1]["close"] == 0.988
+    assert result["data_quality"]["latest_daily_bar"]["status"] == "UNVERIFIED"
+    assert _SECRET_TOKEN not in json.dumps(result)
+
+
+def test_optional_reference_success_is_allowlisted_through_adapter(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(market_adapter, "_load_functions", lambda root: _fake_adapter_namespace(calls))
+    monkeypatch.setattr(market_adapter, "_load_trading_calendar", lambda root: (_ for _ in ()).throw(
+        RuntimeError("calendar unavailable")
+    ))
+
+    payload = market_adapter.run(Namespace(repo_root=tmp_path, symbol="560780", days=20, adjust="qfq"))
+    result = MarketDataService(_config(tmp_path))._normalize(
+        payload, symbol="560780", days=20, adjust="qfq"
+    )
+
+    assert len(calls) == 2
+    assert set(calls) == {("560780", "day", "qfq", 20), ("560780", "day", "", 2)}
+    assert payload["_none_reference"]["bar"]["close"] == 0.988
+    assert result["data_quality"]["latest_daily_bar"]["status"] == "CONSISTENT"
+    assert result["data_quality"]["latest_daily_bar"]["freshness_status"] == "UNKNOWN"
+    assert result["latest_price_bar"]["close"] == 0.988
+    assert _SECRET_PATH not in json.dumps(result)
+
+
+@pytest.mark.parametrize("adjust,source_adjust", [("none", ""), ("hfq", "hfq")])
+def test_adapter_skips_redundant_none_reference_for_non_qfq(tmp_path, monkeypatch, adjust, source_adjust):
+    calls = []
+    monkeypatch.setattr(market_adapter, "_load_functions", lambda root: _fake_adapter_namespace(calls))
+    monkeypatch.setattr(market_adapter, "_load_trading_calendar", lambda root: (_ for _ in ()).throw(
+        RuntimeError("calendar unavailable")
+    ))
+
+    payload = market_adapter.run(Namespace(repo_root=tmp_path, symbol="560780", days=20, adjust=adjust))
+
+    assert calls == [("560780", "day", source_adjust, 20)]
+    assert payload["_none_reference"] is None
 
 
 def test_market_context_uses_official_calendar_for_normal_trading_session():

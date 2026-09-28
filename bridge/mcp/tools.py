@@ -87,7 +87,11 @@ class BridgeMcpTools:
             "bridge_market_snapshot": (
                 "Deterministic, synchronous, read-only fast path for one A-share quote and recent daily K-lines. "
                 "Uses the configured a-stock-data adapter in one bounded Python subprocess, returns public-safe "
-                "structured data, does not start a Codex task or enter WorkerQueue, and provides no investment advice."
+                "structured data, does not start a Codex task or enter WorkerQueue, and provides no investment advice. "
+                "daily_kline preserves the requested adjustment and source values. latest_price_bar is an "
+                "unadjusted latest-price reference when available. For exact prices, use latest_price_bar only "
+                "after checking data_quality.latest_daily_bar.freshness_status; use daily_kline[-1] for exact "
+                "prices only when data_quality.latest_daily_bar.exact_price_safe is true."
             ),
             "bridge_market_context": (
                 "Deterministic, synchronous, read-only context for completed-trading-day review of ETFs present in "
