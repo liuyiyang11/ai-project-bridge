@@ -46,6 +46,10 @@ CodexSessionManager
 | `bridge_task_events` | Bounded incremental safe events written by EventBus. |
 | `bridge_control_task` | `steer`, `interrupt`, `continue`, or `accept` with state checks. |
 | `bridge_task_artifacts` | Bounded artifact manifest; no arbitrary file reads. |
+| `bridge_market_snapshot` | Existing deterministic, read-only quote and daily K-line fast path. |
+| `bridge_market_context` | Deterministic, read-only completed-trading-day review for ETFs in the verified local registry. Historical dates exclude current quotes; target-date 5-minute and daily bars are required, while ETF shares are optional enrichment. |
+
+`bridge_market_context` is synchronous and does not enter the task orchestration chain shown above. It accepts only `VERIFIED` ETF entries in the packaged local registry, validates all source output in a bounded child process, and uses the official exchange calendar for trade dates. A successful response requires target-day 5-minute bars and daily bars to both be `OK`; a missing snapshot or shares enrichment returns `PARTIAL`. If either required bar block is unavailable, the call returns a safe public data-source error. Historical dates mark the snapshot `NOT_APPLICABLE` and do not fetch a current quote. Tracking-index identity and index market-data availability are separate fields; market references use the `MARKET_REFERENCE` role and stay empty in V1.
 
 For code startup, the MCP handler calls `TaskSupervisor.start_code_task()` directly rather than selecting a route through generic `start_task()`. WorkerQueue only owns Futures (`submit`, `cancel`, `shutdown`); it does not report business status. `bridge_task_status` therefore reads the durable snapshot rather than a Future.
 

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "instruments": {
+    "560780": {
+      "symbol": "560780",
+      "asset_type": "ETF",
+      "exchange": "SH",
+      "name": "半导体材料ETF",
+      "verification_status": "VERIFIED",
+      "tracking_index": {
+        "code": "931743",
+        "name": "中证半导体材料设备主题指数",
+        "verification_status": "VERIFIED"
+      }
+    }
+  },
+  "market_references": []
+}

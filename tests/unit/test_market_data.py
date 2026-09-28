@@ -419,7 +419,7 @@ def test_tools_list_has_market_fast_path_and_preserves_original_nine():
     tools = response["result"]["tools"]
     names = {tool["name"] for tool in tools}
 
-    assert len(tools) == 10
+    assert len(tools) == 11
     assert names == set(BridgeMcpTools._SCHEMAS)
     definition = next(tool for tool in tools if tool["name"] == "bridge_market_snapshot")
     assert "synchronous" in definition["description"]

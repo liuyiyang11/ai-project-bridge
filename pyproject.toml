@@ -29,3 +29,6 @@ addopts = "-ra"
 
 [tool.setuptools.packages.find]
 include = ["bridge*"]
+
+[tool.setuptools.package-data]
+bridge = ["market_data/*.json"]

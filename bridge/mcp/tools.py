@@ -14,7 +14,7 @@ from ..public_errors import (
     sanitize_public_status,
 )
 from ..security import validate_unicode_scalars
-from ..market_data import MarketDataService
+from ..market_data import MarketContextService, MarketDataService
 from ..market_data.errors import MarketDataRequestError, MarketDataSourceError, MarketDataTimeoutError
 from .schemas import (
     EmptyInput,
@@ -26,6 +26,7 @@ from .schemas import (
     TaskEventsInput,
     TaskStatusInput,
     MarketSnapshotInput,
+    MarketContextInput,
 )
 
 
@@ -54,6 +55,7 @@ class BridgeMcpTools:
         "bridge_control_task": TaskControlInput,
         "bridge_task_artifacts": TaskArtifactsInput,
         "bridge_market_snapshot": MarketSnapshotInput,
+        "bridge_market_context": MarketContextInput,
     }
 
     def __init__(
@@ -62,11 +64,13 @@ class BridgeMcpTools:
         *,
         supervisor: Optional[TaskSupervisor] = None,
         market_data_service: Optional[MarketDataService] = None,
+        market_context_service: Optional[MarketContextService] = None,
     ):
         if supervisor is None and config is None:
             raise ValueError("config or supervisor is required")
         self.supervisor = supervisor or TaskSupervisor(config)
         self.market_data_service = market_data_service or MarketDataService(getattr(config, "market_data", None))
+        self.market_context_service = market_context_service or MarketContextService(getattr(config, "market_data", None))
 
     @classmethod
     def definitions(cls) -> list[dict[str, Any]]:
@@ -85,6 +89,13 @@ class BridgeMcpTools:
                 "Uses the configured a-stock-data adapter in one bounded Python subprocess, returns public-safe "
                 "structured data, does not start a Codex task or enter WorkerQueue, and provides no investment advice."
             ),
+            "bridge_market_context": (
+                "Deterministic, synchronous, read-only context for completed-trading-day review of ETFs present in "
+                "the verified local instrument registry. Historical trade dates never include a current quote. "
+                "Returns target-date Tencent 5-minute and daily bars; snapshot is unavailable for historical dates. "
+                "ETF-share enrichment may fail. Does not call TaskSupervisor, start or use Codex, enter WorkerQueue, "
+                "or provide investment advice."
+            ),
         }
         return [
             {"name": name, "description": descriptions[name], "inputSchema": schema.schema()}
@@ -99,7 +110,7 @@ class BridgeMcpTools:
             value = schema.parse_obj(arguments or {})
         except ValidationError as exc:
             public = public_error_from_exception(exc, context="mcp")
-            if schema is MarketSnapshotInput:
+            if schema in {MarketSnapshotInput, MarketContextInput}:
                 raise McpToolError(public.message, public_error=public) from None
             raise McpToolError(public.message) from None
         try:
@@ -172,6 +183,9 @@ class BridgeMcpTools:
 
     def bridge_market_snapshot(self, value: MarketSnapshotInput) -> dict[str, Any]:
         return self.market_data_service.snapshot(value.symbol, value.days, value.adjust)
+
+    def bridge_market_context(self, value: MarketContextInput) -> dict[str, Any]:
+        return self.market_context_service.market_context(value.symbol, value.trade_date)
 
     @staticmethod
     def _model_values(value: BaseModel) -> Any:

@@ -103,7 +103,7 @@ class ProjectConfig(BaseModel):
 
 
 class MarketDataConfig(BaseModel):
-    """Local-only configuration for the synchronous stock-data fast path."""
+    """Local-only configuration for the synchronous stock-data fast paths."""
 
     class Config:
         extra = "forbid"
@@ -112,6 +112,7 @@ class MarketDataConfig(BaseModel):
     root: Optional[Path] = None
     python_executable: Optional[Path] = None
     default_timeout_seconds: int = Field(default=30, ge=1, le=120)
+    market_context_timeout_seconds: int = Field(default=12, ge=1, le=12)
 
     @root_validator(skip_on_failure=True)
     def enabled_requires_local_paths(cls, values: dict) -> dict:

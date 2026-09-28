@@ -11,3 +11,7 @@ github 令牌.txt
 
 
 .pytest-*
+
+# Python build artifacts
+build/
+*.egg-info/
