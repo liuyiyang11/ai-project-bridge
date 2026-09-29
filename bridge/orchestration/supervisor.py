@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from pathlib import Path
+from threading import RLock
 from typing import Any, Callable, Optional
 
 from ..codex.session import CodexSessionManager, SessionState, SessionTransitionError
 from ..collectors.artifact_collector import collect_artifacts
 from ..commands import run_registered_command
 from ..experiments.executor import ExperimentExecutor
+from ..experiments.runtime import ExperimentRuntimeRegistry
 from ..executors.code import RuntimeCodeExecutor
-from ..security import SecurityError, ensure_safe_relative_path, resolve_under
+from ..public_errors import (
+    public_error_from_exception,
+    public_error_from_message,
+    sanitize_public_events,
+    sanitize_public_status,
+)
+from ..security import SecurityError, ensure_safe_relative_path, resolve_under, validate_unicode_scalars
 from ..task_store import TaskStore, utc_now
 from ..worktree import WorktreeManager
 from .event_bus import TaskEventBus
@@ -18,6 +27,9 @@ from .router import TaskRequest, TaskRouter
 from .state_machine import InvalidTaskTransition, TaskStateMachine
 from .task_runner import CodeTaskHandler, ExperimentTaskHandler, TaskRunner
 from .worker import WorkerQueue
+
+
+logger = logging.getLogger(__name__)
 
 
 class TaskSupervisor:
@@ -46,14 +58,28 @@ class TaskSupervisor:
             self.session_manager,
             self._prepare_worktree_for_task,
         )
-        self._experiment_executor = experiment_executor or ExperimentExecutor(config, self.store)
+        supplied_experiment_runtime = getattr(experiment_executor, "runtime_registry", None)
+        self._experiment_runtime = (
+            supplied_experiment_runtime
+            if isinstance(supplied_experiment_runtime, ExperimentRuntimeRegistry)
+            else ExperimentRuntimeRegistry()
+        )
+        self._experiment_executor = experiment_executor or ExperimentExecutor(
+            config,
+            self.store,
+            runtime_registry=self._experiment_runtime,
+        )
         self.task_runner = task_runner or TaskRunner(
             store=self.store,
             handlers={
                 "code": CodeTaskHandler(self._code_executor),
                 "experiment": ExperimentTaskHandler(self._experiment_executor),
             },
+            experiment_runtime=self._experiment_runtime,
         )
+        self._lifecycle_lock = RLock()
+        self._closing = False
+        self.store.cleanup_stale_staging()
         self.reconcile_task_events()
         self.recover_tasks()
 
@@ -160,35 +186,37 @@ class TaskSupervisor:
         if not isinstance(instruction, str) or not instruction.strip():
             raise ValueError("rework instruction must be non-empty")
         task_id = str(task_id)
-        with self.store.task_lock(task_id):
-            task = self._stored_state(task_id)
-            if task.get("task_type", "code") != "code":
-                raise ValueError("only code tasks support runtime rework")
-            current = str(task.get("state", task.get("status", "")))
-            if current != SessionState.WAITING_REVIEW.value:
-                raise SessionTransitionError(f"code rework requires WAITING_REVIEW, found {current}")
-            processed = list(task.get("processed_rework_comment_ids", []))
-            if comment_id is not None:
-                if comment_id in processed:
-                    return self.status(task_id)
-                processed.append(comment_id)
-            updates: dict[str, Any] = {
-                "rework_instruction": instruction.strip(),
-                "resume_thread_id": task.get("thread_id"),
-            }
-            if comment_id is not None:
-                updates["processed_rework_comment_ids"] = processed
-            self.store.update_task(task_id, **updates)
-            self._bus(task_id).transition(
-                SessionState.WAITING_REVIEW.value,
-                SessionState.RUNNING.value,
-                "rework requested",
-            )
-            try:
-                self.worker_queue.submit(task_id, self.task_runner.run, task_id, continuation=True)
-            except Exception as exc:
-                self._fail_task(task_id, exc)
-                raise
+        with self._lifecycle_lock:
+            self._ensure_accepting_submissions()
+            with self.store.task_lock(task_id):
+                task = self._stored_state(task_id)
+                if task.get("task_type", "code") != "code":
+                    raise ValueError("only code tasks support runtime rework")
+                current = str(task.get("state", task.get("status", "")))
+                if current != SessionState.WAITING_REVIEW.value:
+                    raise SessionTransitionError(f"code rework requires WAITING_REVIEW, found {current}")
+                processed = list(task.get("processed_rework_comment_ids", []))
+                if comment_id is not None:
+                    if comment_id in processed:
+                        return self.status(task_id)
+                    processed.append(comment_id)
+                updates: dict[str, Any] = {
+                    "rework_instruction": instruction.strip(),
+                    "resume_thread_id": task.get("thread_id"),
+                }
+                if comment_id is not None:
+                    updates["processed_rework_comment_ids"] = processed
+                self.store.update_task(task_id, **updates)
+                self._bus(task_id).transition(
+                    SessionState.WAITING_REVIEW.value,
+                    SessionState.RUNNING.value,
+                    "rework requested",
+                )
+                try:
+                    self._submit_worker_task(task_id, continuation=True)
+                except Exception as exc:
+                    self._fail_task(task_id, exc)
+                    raise
         return self.status(task_id)
 
     def start_presentation_task(
@@ -322,7 +350,7 @@ class TaskSupervisor:
 
     def status(self, task_id: str) -> dict[str, Any]:
         state = self._stored_state(task_id)
-        return {
+        return sanitize_public_status({
             "task_id": task_id,
             "project": state.get("project"),
             "state": state.get("state", state.get("status", "UNKNOWN")),
@@ -336,11 +364,12 @@ class TaskSupervisor:
             "model": state.get("model"),
             "reasoning_effort": state.get("reasoning_effort"),
             "last_error": state.get("last_error"),
-        }
+            "error_code": state.get("error_code"),
+        })
 
     def task_events(self, task_id: str, *, after_seq: int = 0, limit: int = 100) -> list[dict[str, Any]]:
         self._stored_state(task_id)
-        return self.store.read_events(task_id, after_seq=after_seq, limit=limit)
+        return sanitize_public_events(self.store.read_events(task_id, after_seq=after_seq, limit=limit))
 
     def task_artifacts(self, task_id: str, *, kind: Optional[str] = None, limit: int = 100) -> list[dict[str, Any]]:
         if int(limit) < 1 or int(limit) > 1000:
@@ -378,23 +407,95 @@ class TaskSupervisor:
         return self.session_manager.get_catalog(worktree).public_dict()
 
     def close(self) -> None:
-        self.session_manager.close()
-        self.worker_queue.shutdown(wait=False, cancel_futures=True)
+        with self._lifecycle_lock:
+            if self._closing:
+                return
+            self._closing = True
+
+        claimed = []
+        active_states = {SessionState.PREPARING.value, SessionState.RUNNING.value}
+        try:
+            self._cancel_queued_tasks()
+            self._interrupt_running_experiments()
+            claimed = self.session_manager.begin_shutdown()
+            for record in claimed:
+                if not self.store.exists(record.task_id):
+                    continue
+                snapshot = self.store.get_task(record.task_id)
+                if snapshot.get("task_type", "code") != "code":
+                    continue
+                current = str(snapshot.get("state", snapshot.get("status", "")))
+                if current not in active_states:
+                    continue
+                try:
+                    self._bus(record.task_id).transition(
+                        current,
+                        SessionState.INTERRUPTED.value,
+                        "bridge shutdown",
+                        updates={"review_ready": False},
+                    )
+                except InvalidTaskTransition:
+                    # EventBus re-reads under its task lock.  A valid terminal
+                    # transition won the durable race; never turn that race
+                    # into FAILED or resurrect an old active snapshot.
+                    latest = self.store.get_task(record.task_id)
+                    latest_state = str(latest.get("state", latest.get("status", "")))
+                    if latest_state in active_states:
+                        raise
+        finally:
+            # Durable runtime ownership is settled before local wakeup and
+            # before any client close.  The manager close is a local
+            # fail-safe for residual clients and non-runtime sessions.
+            self.session_manager.terminalize_shutdown(claimed)
+            try:
+                self.session_manager.close()
+            finally:
+                # Running workers are released by SessionRecord.completion;
+                # never wait unboundedly for unrelated queue jobs here.
+                self.worker_queue.shutdown(wait=False, cancel_futures=True)
+
+    def _interrupt_running_experiments(self) -> None:
+        active_states = {SessionState.PREPARING.value, SessionState.RUNNING.value}
+        for task_id in self.store.list_task_ids():
+            try:
+                state = self.store.get_task(task_id)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if state.get("task_type", "code") != "experiment":
+                continue
+            current = str(state.get("state", state.get("status", "")))
+            if current not in active_states:
+                continue
+            try:
+                self._bus(task_id).transition(
+                    current,
+                    SessionState.INTERRUPTED.value,
+                    "bridge shutdown",
+                    updates={"review_ready": False},
+                )
+            except InvalidTaskTransition:
+                # A normal completion or another lifecycle owner won the
+                # durable race.  Only cancel a runtime after the interrupt
+                # transition itself has linearized.
+                continue
+            self._experiment_runtime.request_cancel(task_id)
 
     def _enqueue_code_task(self, request: TaskRequest, *, worktree: Optional[Path] = None) -> dict[str, Any]:
         TaskRouter.route(request)
         project = self._project_for(request.project, "code")
         if not isinstance(request.instruction, str) or not request.instruction.strip():
             raise ValueError("instruction must be non-empty")
-        task_id = request.task_id or self._new_task_id()
-        self._create_task(task_id, request, project)
-        if worktree is not None:
-            self.store.update_task(task_id, supplied_worktree=str(Path(worktree).resolve()))
-        try:
-            self.worker_queue.submit(task_id, self.task_runner.run, task_id)
-        except Exception as exc:
-            self._fail_task(task_id, exc)
-            raise
+        with self._lifecycle_lock:
+            self._ensure_accepting_submissions()
+            task_id = request.task_id or self._new_task_id()
+            self._create_task(task_id, request, project)
+            if worktree is not None:
+                self.store.update_task(task_id, supplied_worktree=str(Path(worktree).resolve()))
+            try:
+                self._submit_worker_task(task_id)
+            except Exception as exc:
+                self._fail_task(task_id, exc)
+                raise
         return {"task_id": task_id, "state": SessionState.QUEUED.value, "project": request.project}
 
     def _enqueue_experiment_task(self, request: TaskRequest) -> dict[str, Any]:
@@ -404,14 +505,75 @@ class TaskSupervisor:
             raise ValueError("experiment task requires a command_id")
         if request.command_id not in project.allowed_commands:
             raise ValueError(f"command is not allowed or not registered: {request.command_id}")
-        task_id = request.task_id or self._new_task_id()
-        self._create_task(task_id, request, project)
-        try:
-            self.worker_queue.submit(task_id, self.task_runner.run, task_id)
-        except Exception as exc:
-            self._fail_task(task_id, exc)
-            raise
+        with self._lifecycle_lock:
+            self._ensure_accepting_submissions()
+            task_id = request.task_id or self._new_task_id()
+            self._create_task(task_id, request, project)
+            try:
+                self._submit_worker_task(task_id)
+            except Exception as exc:
+                self._fail_task(task_id, exc)
+                raise
         return {"task_id": task_id, "state": SessionState.QUEUED.value, "project": request.project}
+
+    def _ensure_accepting_submissions(self) -> None:
+        if self._closing:
+            raise RuntimeError("supervisor is shutting down")
+
+    def _submit_worker_task(
+        self,
+        task_id: str,
+        *runner_args: Any,
+        skip_if_closing: bool = False,
+        **runner_kwargs: Any,
+    ) -> bool:
+        with self._lifecycle_lock:
+            if self._closing:
+                if skip_if_closing:
+                    return False
+                self._ensure_accepting_submissions()
+            self.worker_queue.submit(
+                task_id,
+                self.task_runner.run,
+                task_id,
+                *runner_args,
+                **runner_kwargs,
+            )
+            return True
+
+    def _cancel_queued_tasks(self) -> None:
+        cancel = getattr(self.worker_queue, "cancel", None)
+        if not callable(cancel):
+            return
+        candidates: list[str] = []
+        for task_id in self.store.list_task_ids():
+            try:
+                state = self.store.get_task(task_id)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if (
+                state.get("state", state.get("status")) == SessionState.QUEUED.value
+                and state.get("task_type", "code") in {"code", "experiment"}
+            ):
+                candidates.append(task_id)
+
+        for task_id in candidates:
+            if not cancel(task_id) or not self.store.exists(task_id):
+                continue
+            current = str(self.store.get_task(task_id).get("state", ""))
+            if current != SessionState.QUEUED.value:
+                continue
+            try:
+                self._bus(task_id).transition(
+                    SessionState.QUEUED.value,
+                    SessionState.CANCELLED.value,
+                    "bridge shutdown",
+                    updates={"review_ready": False},
+                )
+            except InvalidTaskTransition:
+                # EventBus re-reads under the task lock.  If another lifecycle
+                # owner won the race, preserve that newer durable state.
+                continue
 
     def recover_tasks(self) -> None:
         """Requeue queued code tasks and safely resume only verified active work."""
@@ -424,7 +586,8 @@ class TaskSupervisor:
             task_type = state.get("task_type", "code")
             if task_state == SessionState.QUEUED.value and task_type in {"code", "experiment"}:
                 try:
-                    self.worker_queue.submit(task_id, self.task_runner.run, task_id)
+                    if not self._submit_worker_task(task_id, skip_if_closing=True):
+                        continue
                 except ValueError:
                     continue
             elif task_state in {SessionState.PREPARING.value, SessionState.RUNNING.value} and task_type == "code":
@@ -438,16 +601,23 @@ class TaskSupervisor:
                     recovery_checked_at=utc_now(),
                 )
                 try:
-                    self.worker_queue.submit(task_id, self.task_runner.run, task_id, recovery=True)
+                    if not self._submit_worker_task(task_id, recovery=True, skip_if_closing=True):
+                        continue
                 except ValueError:
                     # A previous recovery pass already owns this Future.  Its
                     # durable state remains the source of truth.
                     continue
                 except Exception as exc:
+                    logger.error(
+                        "verified recovery could not be scheduled task_id=%s error_type=%s",
+                        task_id,
+                        type(exc).__name__,
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
                     self._mark_recovery_unknown(
                         task_id,
                         str(task_state),
-                        f"Bridge could not schedule verified recovery: {type(exc).__name__}: {exc}",
+                        "Bridge could not schedule verified recovery",
                     )
             elif task_state in {SessionState.PREPARING.value, SessionState.RUNNING.value} and task_type == "experiment":
                 self._mark_recovery_unknown(
@@ -497,10 +667,11 @@ class TaskSupervisor:
         return None
 
     def _mark_recovery_unknown(self, task_id: str, current: str, reason: str) -> None:
+        public = public_error_from_message(reason)
         if TaskStateMachine.can_transition(current, SessionState.UNKNOWN.value):
-            self._bus(task_id).transition(current, SessionState.UNKNOWN.value, reason)
-        self.store.update_task(task_id, last_error=reason[:2000])
-        self._bus(task_id).emit("error", {"message": reason[:2000], "previous_state": current})
+            self._bus(task_id).transition(current, SessionState.UNKNOWN.value, "recovery resume could not be verified")
+        self.store.update_task(task_id, last_error=public.message, error_code=public.error_code)
+        self._bus(task_id).emit("error", {**public.as_dict(), "previous_state": current})
 
     def _create_task(self, task_id: str, request: TaskRequest, project: Any) -> dict[str, Any]:
         if self.store.exists(task_id):
@@ -510,6 +681,13 @@ class TaskSupervisor:
         metadata = dict(request.metadata or {})
         if request.command_id is not None:
             metadata["command_id"] = request.command_id
+        validate_unicode_scalars(
+            {
+                "task_id": task_id,
+                "request": vars(request),
+                "metadata": metadata,
+            }
+        )
         self.store.create_task(
             task_id,
             project=request.project,
@@ -596,11 +774,17 @@ class TaskSupervisor:
             return
         state = self._stored_state(task_id)
         current = state.get("state", state.get("status", SessionState.QUEUED.value))
-        message = f"{type(error).__name__}: {error}"[:2000]
+        public = public_error_from_exception(error, context="task")
+        logger.error(
+            "supervisor task failed task_id=%s error_type=%s",
+            task_id,
+            type(error).__name__,
+            exc_info=(type(error), error, error.__traceback__),
+        )
         if current != SessionState.FAILED.value and TaskStateMachine.can_transition(current, SessionState.FAILED.value):
             self._bus(task_id).transition(str(current), SessionState.FAILED.value, "failed")
-        self.store.update_task(task_id, last_error=message)
-        self._bus(task_id).emit("error", {"message": message, "previous_state": current})
+        self.store.update_task(task_id, last_error=public.message, error_code=public.error_code)
+        self._bus(task_id).emit("error", {**public.as_dict(), "previous_state": current})
 
     def _stored_state(self, task_id: str) -> dict[str, Any]:
         if not self.store.exists(task_id):

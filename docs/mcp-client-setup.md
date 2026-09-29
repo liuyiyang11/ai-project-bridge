@@ -1,6 +1,6 @@
-# ChatGPT Desktop MCP 配置
+# Compatible Local MCP Client 的 MCP 配置
 
-本项目的 MCP server 使用标准 STDIO transport，不启动 HTTP 或 WebSocket 服务。ChatGPT Desktop 启动一个本地 Python 进程，通过该进程的 `stdin/stdout` 调用 Bridge 工具。
+本项目的 MCP server 使用标准 STDIO transport，不启动 HTTP 或 WebSocket 服务。Compatible local MCP clients may launch the STDIO server directly，通过该进程的 `stdin/stdout` 调用 Bridge 工具。ChatGPT Web 不直接启动本地 Python；它通过 OpenAI Secure MCP Tunnel 到达本地 STDIO MCP server。完整 Web 接入步骤见 [`docs/chatgpt-web-tunnel.md`](chatgpt-web-tunnel.md)。
 
 ## 1. 安装并验证入口
 
@@ -14,9 +14,9 @@ $Python = 'C:\Users\29833\.conda\envs\py10\python.exe'
 
 准备被 `.gitignore` 忽略的 `config.local.yaml`。其中只能登记本机信任的项目根目录、Git 仓库和允许执行的命令；不要把 token、密码或其他认证信息写入配置。
 
-## 2. ChatGPT Desktop 配置
+## 2. Compatible local MCP client 配置
 
-如果 `python` 已经能找到已安装的 Bridge，最小配置如下：
+如果 `python` 已经能找到已安装的 Bridge，compatible local MCP client 的最小配置如下：
 
 ```json
 {
@@ -32,7 +32,7 @@ $Python = 'C:\Users\29833\.conda\envs\py10\python.exe'
 }
 ```
 
-入口默认读取进程工作目录下的 `config.local.yaml`。在 Windows Desktop 场景中，推荐把 Python、模块和配置路径都固定为实际绝对路径：
+入口默认读取进程工作目录下的 `config.local.yaml`。在 Windows 本地 MCP client 场景中，推荐把 Python、模块和配置路径都固定为实际绝对路径：
 
 ```json
 {
@@ -52,7 +52,7 @@ $Python = 'C:\Users\29833\.conda\envs\py10\python.exe'
 
 请把示例中的 `F:\\ai-project-bridge` 替换成实际路径。`--config` 是本地启动参数，不是 MCP 工具参数；MCP 对话本身不能借此切换配置或项目根目录。
 
-保存 Desktop 配置后，重启或重新加载 MCP 连接。连接成功后，先调用 `bridge_list_projects` 验证已注册的 workspace。
+保存本地 client 配置后，重启或重新加载 MCP 连接。连接成功后，先调用 `bridge_list_projects` 验证已注册的 workspace。ChatGPT Web 请按 [`docs/chatgpt-web-tunnel.md`](chatgpt-web-tunnel.md) 使用 Tunnel connector。
 
 ## 3. Workspace 注册与调用规则
 
@@ -93,7 +93,7 @@ ChatGPT 不能指定 `C:\\xxx`、`D:/xxx`、`cwd`、`root` 或任意仓库路径
 
 ## 4. 故障排查
 
-- Desktop 无法启动进程：确认 `command` 是实际 Python 可执行文件，并确认执行过 `pip install -e .`。
+- 本地 MCP client 无法启动进程：确认 `command` 是实际 Python 可执行文件，并确认执行过 `pip install -e .`。
 - 配置错误：直接运行 `& $Python -m bridge.mcp.server --config F:\\ai-project-bridge\\config.local.yaml`，查看 `stderr` 中的错误。
 - 没有项目可选：检查 `projects`、项目 `capabilities` 和 `config.local.yaml` 的实际路径；不要在对话中传入本机路径替代项目 ID。
 - 任务执行失败：先查询 `bridge_task_status` 和 `bridge_task_events`；确认 Codex CLI 已安装、项目配置的 `root` 可用，且任务 worktree 仍由 Bridge 管理。

@@ -13,7 +13,7 @@ class TaskStateMachine:
     """Central transition policy shared by transports and control tools."""
 
     _TRANSITIONS = {
-        SessionState.QUEUED: {SessionState.PREPARING, SessionState.FAILED},
+        SessionState.QUEUED: {SessionState.PREPARING, SessionState.FAILED, SessionState.CANCELLED},
         SessionState.PREPARING: {SessionState.RUNNING, SessionState.FAILED, SessionState.INTERRUPTED, SessionState.UNKNOWN},
         SessionState.RUNNING: {SessionState.WAITING_REVIEW, SessionState.INTERRUPTED, SessionState.FAILED, SessionState.UNKNOWN},
         SessionState.WAITING_REVIEW: {SessionState.RUNNING, SessionState.COMPLETED},

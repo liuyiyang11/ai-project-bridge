@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ..github import find_executable
+from ..security import validate_unicode_scalars
 
 
 class CodexUnavailableError(RuntimeError):
@@ -92,6 +93,9 @@ class CodexRunner:
     ) -> CodexResult:
         if not self._available:
             raise CodexUnavailableError("Codex CLI is not available; install it or update codex_binary")
+        validate_unicode_scalars(
+            {"prompt": prompt, "requested_thread_id": requested_thread_id}
+        )
         events_path.parent.mkdir(parents=True, exist_ok=True)
         final_path = final_file or events_path.with_name("codex-final.txt")
         try:
@@ -115,15 +119,24 @@ class CodexRunner:
             stdout, stderr = process.communicate()
             exit_code = 124
 
+        events = self._parse_events(stdout or "")
+        thread_id = self._find_thread_id(events)
+        final_message = final_path.read_text(encoding="utf-8") if final_path.is_file() else self._find_final_message(events)
+        validate_unicode_scalars(
+            {
+                "stdout": stdout or "",
+                "stderr": stderr or "",
+                "events": events,
+                "final_message": final_message,
+                "thread_id": thread_id,
+            }
+        )
         # Each caller normally supplies a per-run path.  Append here as a second
         # guard so a direct runner reuse can never erase an earlier event stream.
         with events_path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(stdout or "")
-        events = self._parse_events(stdout or "")
-        thread_id = self._find_thread_id(events)
         if requested_thread_id is not None and thread_id != requested_thread_id:
             raise CodexResumeMismatchError(requested_thread_id, thread_id)
-        final_message = final_path.read_text(encoding="utf-8") if final_path.is_file() else self._find_final_message(events)
         return CodexResult(
             str(uuid.uuid4()),
             thread_id,

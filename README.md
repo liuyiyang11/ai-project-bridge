@@ -4,6 +4,8 @@ AI Project Bridge 是一个运行在 Windows 11 本机的前台 Python 程序。
 
 Bridge 不执行远程 Issue 或 MCP 请求中的任意 shell、PowerShell、Python、绝对路径或环境变量。真实项目根目录和允许执行的 argv 只能来自本机、被 `.gitignore` 忽略的 `config.local.yaml`。GitHub Issue 仍然是兼容的任务入口；V0.2 另外提供 transport-independent Supervisor 和本地 MCP stdio adapter。
 
+ChatGPT Web 通过 OpenAI Secure MCP Tunnel 接入本地 Bridge 的 profile、doctor/start 用法和后续人工验收步骤见 [`docs/chatgpt-web-tunnel.md`](docs/chatgpt-web-tunnel.md)。本仓库不实现 Tunnel，也不在未完成账号验收前声称已在线连接。
+
 ## V0.2.1：代码任务异步运行时
 
 V0.2.1 只收敛并加固 `code` task 的异步运行时，不新增业务功能。代码任务的唯一运行时调用链为：
@@ -258,8 +260,9 @@ $Python = 'C:\Users\29833\.conda\envs\py10\python.exe'
 & $Python -m bridge.mcp.server --config config.local.yaml
 ```
 
-本地 MCP 通过标准 STDIO 服务兼容 MCP 的客户端；ChatGPT Desktop 配置见
-[docs/mcp-client-setup.md](docs/mcp-client-setup.md)，工具列表和输入边界见 [docs/mcp-tools.md](docs/mcp-tools.md)。
+本地 MCP 通过标准 STDIO 服务兼容 MCP 的客户端；本地 client 配置见
+[docs/mcp-client-setup.md](docs/mcp-client-setup.md)，ChatGPT Web Tunnel 配置见
+[docs/chatgpt-web-tunnel.md](docs/chatgpt-web-tunnel.md)，工具列表和输入边界见 [docs/mcp-tools.md](docs/mcp-tools.md)。
 
 对 code task，MCP 入口固定为 `bridge_start_code_task → TaskSupervisor.start_code_task()`；它不会依据 `task_type` 走通用 `start_task()` 分支，也不会直接创建 Codex session。
 

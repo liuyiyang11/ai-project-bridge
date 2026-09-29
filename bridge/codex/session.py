@@ -11,9 +11,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ..security import validate_unicode_scalars
 from ..task_store import TaskStore
 from .app_server import CodexAppServerClient
 from .model_catalog import CodexModelCatalog, CodexModelError
+from ..public_errors import sanitize_error_payload, sanitize_public_value, public_error_from_exception
 from .protocol import CodexProcessError, CodexProtocolError
 from .runner import CodexResumeMismatchError
 
@@ -399,9 +401,56 @@ class CodexSessionManager:
     def status(self, task_id: str) -> dict[str, Any]:
         return self._get(task_id).public_dict()
 
+    def begin_shutdown(self) -> list[SessionRecord]:
+        """Claim active sessions before any client is closed.
+
+        The claim is the late-notification fence.  ``_on_event`` uses the
+        same lock, so a completion either wins before this method or is
+        ignored after ``interrupt_requested`` is set.
+        """
+        with self._lock:
+            claimed: list[SessionRecord] = []
+            for record in self.sessions.values():
+                if record.state in {SessionState.PREPARING, SessionState.RUNNING}:
+                    record.interrupt_requested = True
+                    claimed.append(record)
+            return claimed
+
+    def terminalize_shutdown(self, records: list[SessionRecord]) -> None:
+        """Finish local shutdown state after the owner persisted its intent.
+
+        This method deliberately does not perform a durable state transition.
+        ``TaskSupervisor`` owns durable shutdown for runtime tasks; the
+        session manager owns only local terminalization and waiter wakeup.
+        """
+        with self._lock:
+            for record in records:
+                current = self.sessions.get(record.task_id)
+                if current is not record:
+                    continue
+                record.interrupt_requested = True
+                record.state = SessionState.INTERRUPTED
+                record.current_action = "bridge shutdown"
+                record.completion.set()
+                self._persist(record)
+
     def close(self) -> None:
+        """Locally fail-safe active sessions, then close all client resources.
+
+        This direct manager path cannot own Supervisor durable transitions;
+        it prevents an active record from becoming a stranded waiter.
+        ``TaskSupervisor.close`` persists runtime-task shutdown first.
+        """
+        claimed = self.begin_shutdown()
+        self.terminalize_shutdown(claimed)
+        close_error: Optional[BaseException] = None
         for task_id in list(self._clients):
-            self._close_client(task_id)
+            try:
+                self._close_client(task_id)
+            except BaseException as exc:
+                close_error = close_error or exc
+        if close_error is not None:
+            raise close_error
 
     def _new_client(self, record: SessionRecord) -> Any:
         handler = lambda event: self._on_event(record.task_id, event)
@@ -439,14 +488,21 @@ class CodexSessionManager:
         return CodexAppServerClient(binary, cwd=cwd)
 
     def _on_event(self, task_id: str, event: dict[str, Any]) -> None:
+        validate_unicode_scalars({"task_id": task_id, "event": event})
         with self._lock:
             record = self.sessions.get(task_id)
             if record is None:
                 return
             if record.events_path:
                 record.events_path.parent.mkdir(parents=True, exist_ok=True)
+                safe_event = sanitize_public_value(event)
+                if isinstance(event.get("method"), str) and event.get("method") == "error":
+                    safe_event = {
+                        "method": "error",
+                        "params": sanitize_error_payload(event.get("params")),
+                    }
                 with record.events_path.open("a", encoding="utf-8", newline="\n") as handle:
-                    handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+                    handle.write(json.dumps(safe_event, ensure_ascii=False) + "\n")
             method = event.get("method")
             params = event.get("params") if isinstance(event.get("params"), dict) else {}
             logger.info("Codex task notification receive task_id=%s method=%s", task_id, method or "unknown")
@@ -492,7 +548,7 @@ class CodexSessionManager:
                 else:
                     self._fail(record, RuntimeError(self._turn_error(message) or str(message)))
             elif method == "warning":
-                record.current_action = str(params.get("message") or "warning")[:1000]
+                record.current_action = "warning"
             elif method == "thread/status/changed":
                 record.current_action = "thread status changed"
             elif method in {"turn/diff/updated", "item/fileChange/outputDelta", "item/fileChange/patchUpdated"}:
@@ -539,6 +595,7 @@ class CodexSessionManager:
         return "reconnecting"
 
     def _emit_event(self, record: SessionRecord, method: str, params: dict[str, Any]) -> None:
+        validate_unicode_scalars({"method": method, "params": params})
         mapped = {
             "thread/started": "thread_started",
             "turn/started": "turn_started",
@@ -642,15 +699,21 @@ class CodexSessionManager:
             self._persist(record)
 
     def _fail(self, record: SessionRecord, error: Exception) -> None:
-        record.last_error = f"{type(error).__name__}: {error}"
-        logger.error("Codex task failed task_id=%s error_type=%s", record.task_id, type(error).__name__)
+        public = public_error_from_exception(error, context="codex")
+        record.last_error = public.message
+        logger.error(
+            "Codex task failed task_id=%s error_type=%s",
+            record.task_id,
+            type(error).__name__,
+            exc_info=(type(error), error, error.__traceback__),
+        )
         if record.state != SessionState.FAILED:
             self._set_state(record, SessionState.FAILED, "failed")
         else:
             record.current_action = "failed"
             self._persist(record)
         record.completion.set()
-        self._emit_event(record, "error", {"message": record.last_error})
+        self._emit_event(record, "error", public.as_dict())
         self._persist(record)
 
     def _close_client(self, task_id: str) -> None:

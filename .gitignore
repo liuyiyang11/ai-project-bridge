@@ -14,3 +14,7 @@ tunnel-client-v0.0.14-windows-amd64/
 
 
 .pytest-*
+
+# Python build artifacts
+build/
+*.egg-info/

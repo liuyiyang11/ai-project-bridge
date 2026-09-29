@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Any, List, Literal, Optional
 
 from pydantic import BaseModel, Field, StrictStr, conint, validator
@@ -92,3 +93,33 @@ class TaskArtifactsInput(StrictModel):
     limit: conint(strict=True, ge=1, le=1000) = 100
 
     _safe_id = validator("task_id", allow_reuse=True)(_safe_task_id)
+
+
+class MarketSnapshotInput(StrictModel):
+    symbol: StrictStr = Field(min_length=1, max_length=32)
+    days: conint(strict=True, ge=1, le=250) = 20
+    adjust: Literal["qfq", "hfq", "none"] = "qfq"
+
+
+class MarketContextInput(StrictModel):
+    symbol: StrictStr = Field(min_length=1, max_length=32)
+    trade_date: Optional[StrictStr] = Field(default=None, min_length=10, max_length=10)
+
+    @validator("symbol")
+    def validate_symbol_shape(cls, value: str) -> str:
+        if not re.fullmatch(r"[0-9]{6}", value):
+            raise ValueError("symbol must be six digits")
+        return value
+
+    @validator("trade_date")
+    def validate_trade_date_shape(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            raise ValueError("trade_date must use YYYY-MM-DD")
+        try:
+            if date.fromisoformat(value).isoformat() != value:
+                raise ValueError("trade_date must use YYYY-MM-DD")
+        except ValueError as exc:
+            raise ValueError("trade_date must use YYYY-MM-DD") from exc
+        return value

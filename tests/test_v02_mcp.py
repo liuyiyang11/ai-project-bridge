@@ -49,10 +49,23 @@ def _attach(fake, kwargs):
     return fake
 
 
-def test_mcp_exposes_nine_tools_and_safe_task_lifecycle(tmp_path):
+def test_mcp_exposes_eleven_tools_and_safe_task_lifecycle(tmp_path):
     _, _, supervisor = make_bridge(tmp_path)
     tools = BridgeMcpTools(supervisor=supervisor)
-    assert len(tools.definitions()) == 9
+    assert len(tools.definitions()) == 11
+    assert {tool["name"] for tool in tools.definitions()} >= {
+        "bridge_list_projects",
+        "bridge_codex_catalog",
+        "bridge_start_code_task",
+        "bridge_start_experiment_review",
+        "bridge_start_presentation_task",
+        "bridge_task_status",
+        "bridge_task_events",
+        "bridge_control_task",
+        "bridge_task_artifacts",
+        "bridge_market_snapshot",
+        "bridge_market_context",
+    }
     assert tools.call("bridge_list_projects") == {"projects": [{"id": "demo", "capabilities": ["code", "experiment-review", "presentation"]}]}
 
     started = tools.call("bridge_start_code_task", {"project": "demo", "instruction": "change code", "acceptance": ["tests pass"]})
@@ -94,4 +107,4 @@ def test_mcp_stdio_round_trip_has_no_non_json_stdout(tmp_path):
     server.serve(incoming, outgoing)
     responses = [json.loads(line) for line in outgoing.getvalue().splitlines()]
     assert responses[0]["result"]["serverInfo"]["name"] == "ai-project-bridge"
-    assert len(responses[1]["result"]["tools"]) == 9
+    assert len(responses[1]["result"]["tools"]) == 11

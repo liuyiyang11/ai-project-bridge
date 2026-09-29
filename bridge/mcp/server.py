@@ -8,7 +8,26 @@ from pathlib import Path
 from typing import Any, Optional, TextIO, Union
 
 from ..config import ConfigError, load_config
+from ..public_errors import public_error_from_exception, sanitize_public_text
 from .tools import BridgeMcpTools, McpToolError
+
+
+def _configure_stdio_utf8() -> None:
+    """Make the real MCP protocol streams independent of the host code page."""
+
+    streams = (
+        ("stdin", sys.stdin, "strict"),
+        ("stdout", sys.stdout, "strict"),
+        ("stderr", sys.stderr, "backslashreplace"),
+    )
+    for name, stream, errors in streams:
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            raise RuntimeError(f"MCP {name} stream does not support UTF-8 configuration")
+        try:
+            reconfigure(encoding="utf-8", errors=errors)
+        except (AttributeError, OSError, ValueError) as exc:
+            raise RuntimeError(f"MCP {name} stream could not be configured as UTF-8") from exc
 
 
 class McpStdioServer:
@@ -61,14 +80,35 @@ class McpStdioServer:
                     "isError": False,
                 }
             except McpToolError as exc:
+                public = public_error_from_exception(exc, context="mcp")
+                if exc.public_error is not None:
+                    public_payload = exc.public_error.as_dict()
+                    result = {
+                        "content": [{"type": "text", "text": json.dumps(public_payload, ensure_ascii=False)}],
+                        "structuredContent": public_payload,
+                        "isError": True,
+                    }
+                else:
+                    result = {
+                        "content": [{"type": "text", "text": public.message}],
+                        "isError": True,
+                    }
+            except Exception as exc:
+                logging.getLogger(__name__).error(
+                    "MCP request failed error_type=%s",
+                    type(exc).__name__,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
                 result = {
-                    "content": [{"type": "text", "text": str(exc)}],
+                    "content": [{"type": "text", "text": "The MCP tool request failed."}],
                     "isError": True,
                 }
             return self._result(message_id, result)
-        return self._error(message_id, -32601, f"method not found: {method}")
+        return self._error(message_id, -32601, "method not found")
 
     def serve(self, stdin: Optional[TextIO] = None, stdout: Optional[TextIO] = None) -> None:
+        if stdin is None and stdout is None:
+            _configure_stdio_utf8()
         input_stream = stdin or sys.stdin
         output_stream = stdout or sys.stdout
         for line in input_stream:
@@ -79,8 +119,8 @@ class McpStdioServer:
                 if not isinstance(message, dict):
                     raise ValueError("message must be an object")
                 response = self.handle_message(message)
-            except (json.JSONDecodeError, ValueError) as exc:
-                response = self._error(None, -32700, f"invalid JSON-RPC message: {exc}")
+            except (json.JSONDecodeError, ValueError):
+                response = self._error(None, -32700, "invalid JSON-RPC message")
             if response is not None:
                 output_stream.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")
                 output_stream.flush()
@@ -98,7 +138,11 @@ class McpStdioServer:
 
     @staticmethod
     def _error(message_id: Any, code: int, message: str) -> dict[str, Any]:
-        return {"jsonrpc": "2.0", "id": message_id, "error": {"code": code, "message": message[:2000]}}
+        return {
+            "jsonrpc": "2.0",
+            "id": message_id,
+            "error": {"code": code, "message": sanitize_public_text(message, limit=2000)},
+        }
 
 
 MCPStdioServer = McpStdioServer

@@ -12,6 +12,8 @@ from .executors.presentation import PresentationExecutor
 from .github import GhClient, Issue
 from .orchestration.models import TaskResult
 from .orchestration.supervisor import TaskSupervisor
+from .public_errors import public_error_from_exception, sanitize_public_value
+from .security import validate_unicode_scalars
 from .task_parser import TaskParseError, parse_rework_comment, parse_task_body
 from .task_store import TaskStore, utc_now
 
@@ -223,22 +225,23 @@ class Dispatcher:
 
     def _record_runtime_failure(self, issue: Issue, error: Exception) -> dict:
         """Publish a runtime failure without rewriting its uppercase lifecycle."""
-        message = f"{type(error).__name__}: {error}"
+        public = public_error_from_exception(error, context="task")
         if not self.store.exists(issue.number):
             self.store.initialize(issue.number, issue.body, {"status": "failed", "issue_url": issue.url})
-        self.store.update_task(issue.number, finished_at=utc_now(), last_error=message)
-        failure_result = {"status": "failed", "error": message}
+        self.store.update_task(issue.number, finished_at=utc_now(), last_error=public.message, error_code=public.error_code)
+        failure_result = {"status": "failed", "error": public.message, "error_code": public.error_code}
         state = self.store.load_state(issue.number)
         if state.get("runs"):
-            failure_result["runs"] = state["runs"]
-            failure_result["run"] = state["runs"][-1]
+            safe_runs = sanitize_public_value(state["runs"])
+            failure_result["runs"] = safe_runs
+            failure_result["run"] = safe_runs[-1] if isinstance(safe_runs, list) else {}
         self.store.write_result(issue.number, failure_result)
         try:
             self.github.set_status(issue.number, "failed")
-            self.github.comment(issue.number, f"Bridge rejected or failed this task: {message[:700]}")
+            self.github.comment(issue.number, f"Bridge rejected or failed this task: {public.message[:700]}")
         except Exception:
             pass
-        return {"issue_number": issue.number, "status": "failed", "error": message}
+        return {"issue_number": issue.number, "status": "failed", "error": public.message, "error_code": public.error_code}
 
     def _execute(self, issue: Issue, task: Any, project: Any, rework_instruction: Optional[str]) -> dict:
         executor = self.executors[task.task_type]
@@ -269,25 +272,40 @@ class Dispatcher:
             raise
 
     def _record_failure(self, issue: Issue, error: Exception, *, preserve_review: bool = False) -> dict:
-        message = f"{type(error).__name__}: {error}"
+        public = public_error_from_exception(error, context="task")
         if not self.store.exists(issue.number):
             self.store.initialize(issue.number, issue.body, {"status": "failed", "issue_url": issue.url})
-        state = self.store.update_state(issue.number, status="review" if preserve_review else "failed", finished_at=utc_now(), last_error=message)
-        failure_result = {"status": "review" if preserve_review else "failed", "error": message}
+        state = self.store.update_state(
+            issue.number,
+            status="review" if preserve_review else "failed",
+            finished_at=utc_now(),
+            last_error=public.message,
+            error_code=public.error_code,
+        )
+        failure_result = {
+            "status": "review" if preserve_review else "failed",
+            "error": public.message,
+            "error_code": public.error_code,
+        }
         if state.get("runs"):
-            failure_result["runs"] = state["runs"]
-            failure_result["run"] = state["runs"][-1]
+            safe_runs = sanitize_public_value(state["runs"])
+            failure_result["runs"] = safe_runs
+            failure_result["run"] = safe_runs[-1] if isinstance(safe_runs, list) else {}
         self.store.write_result(issue.number, failure_result)
         try:
             self.github.set_status(issue.number, "review" if preserve_review else "failed")
-            self.github.comment(issue.number, f"Bridge {'could not complete rework' if preserve_review else 'rejected or failed this task'}: {message[:700]}")
+            self.github.comment(issue.number, f"Bridge {'could not complete rework' if preserve_review else 'rejected or failed this task'}: {public.message[:700]}")
         except Exception:
             pass
-        return {"issue_number": issue.number, "status": "review" if preserve_review else "failed", "error": message}
+        return {
+            "issue_number": issue.number,
+            "status": "review" if preserve_review else "failed",
+            "error": public.message,
+            "error_code": public.error_code,
+        }
 
     def _write_bundle(self, issue: Issue, task: Any, result: dict) -> None:
         bundle_dir = Path(result.get("bundle_dir") or (self.store.task_dir(issue.number) / "review_bundle"))
-        bundle_dir.mkdir(parents=True, exist_ok=True)
         manifest = {
             "task_id": f"issue-{issue.number}",
             "issue_number": issue.number,
@@ -305,15 +323,18 @@ class Dispatcher:
             "pr_url": result.get("pr_url"),
             "known_limitations": result.get("known_limitations", ""),
         }
-        (bundle_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         summary = bundle_dir / "summary.md"
+        summary_text = (
+            f"# Bridge review bundle\n\n- Issue: #{issue.number}\n- Task type: `{task.task_type}`\n- Project: `{task.project}`\n- Status: `review`\n\n"
+            + str(result.get("final_message") or "Deterministic review completed.")
+            + "\n"
+        )
+        validate_unicode_scalars({"manifest": manifest, "summary": summary_text})
+        manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8", "strict")
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        (bundle_dir / "manifest.json").write_bytes(manifest_bytes)
         if not summary.exists():
-            summary.write_text(
-                f"# Bridge review bundle\n\n- Issue: #{issue.number}\n- Task type: `{task.task_type}`\n- Project: `{task.project}`\n- Status: `review`\n\n"
-                + str(result.get("final_message") or "Deterministic review completed.")
-                + "\n",
-                encoding="utf-8",
-            )
+            summary.write_text(summary_text, encoding="utf-8")
 
     @staticmethod
     def _status(labels: set[str]) -> Optional[str]:

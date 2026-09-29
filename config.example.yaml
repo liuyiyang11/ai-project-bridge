@@ -46,3 +46,12 @@ projects:
         argv: ["python", "tools/evaluate.py"]
     artifact_dirs: ["outputs", "results", "runs"]
 
+# Optional synchronous market-data fast path. Real paths belong only in
+# ignored config.local.yaml; leave disabled in the portable example.
+market_data:
+  enabled: false
+  root: null
+  python_executable: null
+  default_timeout_seconds: 30
+  market_context_timeout_seconds: 12
+

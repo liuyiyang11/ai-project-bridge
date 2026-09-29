@@ -108,4 +108,5 @@ def test_task_runner_has_one_exception_exit_to_failed(tmp_path):
     assert store.get_task("task-1")["state"] == "FAILED"
     events = TaskEventBus(store, "task-1").events(after_seq=0, limit=100)
     assert any(event["type"] == "error" for event in events)
-    assert "traceback" in store.get_task("task-1")["last_error"]
+    assert store.get_task("task-1")["error_code"] == "CODEX_START_FAILED"
+    assert "traceback" not in store.get_task("task-1")["last_error"].casefold()
